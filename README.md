@@ -5,6 +5,13 @@
 **Reconnaissance for Azure compute quota, SKU restrictions, and availability-zone
 mappings across many subscriptions, regions, and SKUs — in one Excel workbook.**
 
+> ⚠️ **Not a Microsoft product.** QuotaRecon is a personal open-source
+> project maintained in an individual capacity. It is not affiliated with,
+> endorsed by, or supported by Microsoft. It is provided **"AS IS"** under
+> the MIT [LICENSE](LICENSE) with no warranty of any kind. Do not open
+> Microsoft support cases for issues with this tool — open a GitHub issue
+> instead.
+
 QuotaRecon answers the questions that come up on every capacity call:
 
 1. **Do I actually have quota for `<SKU>` in `<region>` on `<subscription>`?**
