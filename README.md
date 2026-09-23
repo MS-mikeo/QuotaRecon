@@ -46,6 +46,44 @@ arguments through `cmd.exe` and break on `?` in URLs. It uses
 
 ---
 
+## Get the script
+
+Two ways to get a local copy — pick whichever you're comfortable with.
+
+### Option A — Download the ZIP (no git required)
+
+1. Go to https://github.com/MS-mikeo/QuotaRecon.
+2. Click the green **Code** button → **Download ZIP**.
+3. Right-click the downloaded ZIP → **Properties** → tick **Unblock** →
+   **OK**. (Windows marks files downloaded from the internet as blocked;
+   this one click unblocks every file inside.)
+4. Extract the ZIP anywhere, e.g. `C:\Tools\QuotaRecon`.
+5. Open PowerShell in that folder and run the Quick start steps below.
+
+If you skip step 3, you can unblock the extracted files instead:
+
+```powershell
+Get-ChildItem -Path C:\Tools\QuotaRecon -Recurse | Unblock-File
+```
+
+If PowerShell refuses to run the scripts with an execution-policy error,
+allow signed and local scripts for your user only:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+### Option B — Clone with git
+
+```powershell
+git clone https://github.com/MS-mikeo/QuotaRecon.git
+cd QuotaRecon
+```
+
+New releases are just `git pull` away.
+
+---
+
 ## Quick start
 
 ```powershell
