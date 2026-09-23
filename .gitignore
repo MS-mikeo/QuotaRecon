@@ -1,0 +1,24 @@
+output/
+*.xlsx
+*.log
+
+# Local-only files: anything ending in .local.<ext> stays on your machine.
+# Use this for real subscription IDs, real tenant IDs, real customer data.
+# NOTE: no !templates/*.csv exception — an exception here would also un-ignore
+# templates/subscriptions.local.csv, which we absolutely don't want.
+*.local.csv
+*.local.md
+*.local.ps1
+*.local.json
+
+# VS Code workspace state and Copilot instructions — keep local.
+.vscode/
+.github/copilot-instructions.md
+
+# Common secrets patterns just in case.
+*.pfx
+*.key
+*.pem
+.env
+.env.*
+

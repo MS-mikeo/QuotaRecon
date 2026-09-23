@@ -1,0 +1,12 @@
+Sku
+# One SKU or FAMILY per line. Examples:
+#   Standard_D4s_v5  - full size name
+#   D4s_v5           - short size
+#   D4s v5           - spaces ok
+#   D4sv5            - no separators
+#   Ddsv5            - FAMILY (auto-picks smallest offered size as probe)
+# The Inputs sheet records what each entry was resolved to.
+Ddsv6
+Ddsv5
+Dasv5
+Lasv4
