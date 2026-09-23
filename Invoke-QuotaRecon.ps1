@@ -67,9 +67,8 @@ param(
     [string]   $OutputPath,
 
     # When set, writes every ARM request URL (and 4xx response bodies) to a
-    # transcript log next to the output workbook. Handy when a customer
-    # reports weird results and you want a repro trail. Zero overhead when
-    # not set.
+    # transcript log next to the output workbook. Useful for reproducing
+    # unexpected results. Zero overhead when not set.
     [switch]   $DiagnosticLog
 )
 

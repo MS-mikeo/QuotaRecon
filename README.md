@@ -20,22 +20,25 @@ QuotaRecon answers the questions that come up on every capacity call:
    subscriptions.
 
 Output is a single `.xlsx` with one worksheet per concern plus a rolled-up
-`Summary` sheet you can hand to a customer.
+`Summary` sheet suitable for review or handoff.
 
 ---
 
 ## Requirements
 
 - **PowerShell 7+** (Windows PowerShell 5.1 also works, but 7 is recommended).
-- **Az PowerShell** — at minimum `Az.Accounts`. Sign in once with
-  `Connect-AzAccount` before running.
-- **ImportExcel** module for the workbook writer:
+- **`Az.Accounts` PowerShell module** — used for `Get-AzAccessToken` and the
+  `Get-AzSubscription` fallback in the subscription-name resolver. Sign in
+  once with `Connect-AzAccount` before running.
+- **`ImportExcel` PowerShell module** — used to write the `.xlsx` workbook
+  with conditional formatting.
+- Read access on every subscription in your list (`Reader` role is enough).
 
-  ```powershell
-  Install-Module ImportExcel -Scope CurrentUser
-  ```
+Install both modules in one line:
 
-- Read access on every subscription in your list (`Reader` is enough).
+```powershell
+Install-Module Az.Accounts, ImportExcel -Scope CurrentUser -Force
+```
 
 QuotaRecon deliberately avoids `az rest` / `az.cmd` because those re-parse
 arguments through `cmd.exe` and break on `?` in URLs. It uses
@@ -77,9 +80,8 @@ Or omit everything and let the script prompt you interactively.
 
 Add `-DiagnosticLog` to any invocation to write a full transcript log
 (including every ARM URL and any 4xx response body) to
-`<OutputPath>.log`. Handy when a customer reports a weird result and you
-need a repro trail. Do not use for demos — the log contains subscription
-GUIDs.
+`<OutputPath>.log`. Useful for reproducing a weird result. Do not share the
+log file without redacting — it contains subscription GUIDs.
 
 ### Reference data (regions + all VM SKUs)
 
@@ -106,7 +108,7 @@ SubscriptionId
 
 Values must be GUIDs. Anything else is reported in the `Errors` sheet.
 **Real GUIDs belong in `subscriptions.local.csv`** — that filename pattern
-is in `.gitignore`, so your customer's IDs never end up on GitHub.
+is in `.gitignore`, so real IDs never end up on GitHub.
 
 ### `templates/regions.csv`
 
@@ -229,20 +231,14 @@ QuotaRecon/
 
 ---
 
-## Roadmap
-
-- v0.1 — this release: quota + restrictions + zone map in a single XLSX,
-  family aggregation, physical-zone mapping via `/locations`, `-DiagnosticLog`
-  transcript, and reference CSVs.
-- v0.2 — parallelize per-subscription with `ForEach-Object -Parallel`.
-- v0.3 — network / storage quota (currently compute only).
-- v0.4 — HTML report alongside the XLSX for easier customer share-outs.
-
----
-
 ## Contributing / feedback
 
-QuotaRecon is intended to be handed to customers and other Microsoft CSAs, so
-correctness matters more than cleverness. Bug reports and PRs welcome —
-especially edge cases in SKU naming, family-vCPU counters, and non-standard
-regions.
+Correctness matters more than cleverness in this tool. Bug reports and pull
+requests are welcome — especially edge cases in SKU naming, family-vCPU
+counters, and non-standard regions. Open an issue at
+https://github.com/MS-mikeo/QuotaRecon/issues with:
+
+1. The exact input you used (regions, SKUs).
+2. The row from the `Summary` or `Errors` sheet that looks wrong.
+3. If possible, the `.log` file produced by `-DiagnosticLog`
+   (scrub any real subscription IDs first).
