@@ -31,6 +31,59 @@ Output is a single `.xlsx` with one worksheet per concern plus a rolled-up
 
 ---
 
+## Output Examples
+
+### Per subscription / per region summary of SKU quota, physical zone mapping for AZs, and any region / zonal restrictions
+
+The `Summary` sheet gives you every combination of (Subscription × Region ×
+Family) on one row: family + regional vCPU quota on the left, physical
+zone mapping and per-zone restriction status on the right. Green cells are
+`None` (no restriction), red cells are `Yes` (restriction present); the
+`RestrictionSummary` column carries the full `az vm list-skus`-style detail
+line.
+
+![Summary sheet — identity, family, and quota columns](graphics/summary-01.png)
+
+![Summary sheet — physical zones and restriction columns](graphics/summary-02.png)
+
+### Full quota snapshot for each subscription / region for all SKUs
+
+The `Quota` sheet is the raw `Microsoft.Compute/locations/{region}/usages`
+output — every counter Azure reports (regional total vCPUs, low-priority
+vCPUs, VMs, availability sets, VMSS, dedicated vCPUs, and every family
+counter) for every (Subscription × Region) pair. Useful for looking
+beyond the families listed in `templates/skus.csv`, or for handing off the
+un-filtered snapshot.
+
+![Quota sheet — raw Microsoft.Compute usages per Sub x Region](graphics/quota-01.png)
+
+### Separate tab listing any subscription SKU restrictions in place
+
+The `Restrictions` sheet is the flattened
+`Microsoft.Compute/skus[].restrictions[]` list — one row per restriction
+per (Subscription × Region × Sku). Each row shows `Type` (`Location` or
+`Zone`), the `Locations` and `Zones` the restriction applies to, and the
+`ReasonCode` (typically `NotAvailableForSubscription`). This is the raw
+data behind the `Regional-Restrictions` and `Logical-AZn-Restrictions`
+cells in the `Summary` sheet.
+
+![Restrictions sheet — one row per restriction with Type, Locations, Zones, and ReasonCode](graphics/restrictions-01.png)
+
+### Zone mapping for each subscription / region — logical AZ to physical AZ
+
+The `ZoneMap` sheet is built from
+`GET /subscriptions/{id}/locations?api-version=2022-12-01` and its
+`availabilityZoneMappings` array. For every (Subscription × Region) it
+lists each `LogicalZone` (`1`/`2`/`3`) and the `PhysicalZone` label the
+platform maps it to (e.g. `uksouth-az1`). Two subscriptions in the same
+tenant whose logical `1` resolves to the same physical label are
+co-located. Non-AZ regions carry a `Note` explaining why no mapping is
+available.
+
+![ZoneMap sheet — logical to physical availability zone mapping per Sub x Region](graphics/zonemap-01.png)
+
+---
+
 ## Requirements
 
 - **PowerShell 7+** (Windows PowerShell 5.1 also works, but 7 is recommended).
