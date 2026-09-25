@@ -181,6 +181,62 @@ Add `-DiagnosticLog` to any invocation to write a full transcript log
 `<OutputPath>.log`. Useful for reproducing a weird result. Do not share the
 log file without redacting — it contains subscription GUIDs.
 
+### VM inventory (opt-in)
+
+Add `-IncludeVmInventory` to any invocation to list every deployed VM and
+VM Scale Set whose size belongs to one of the requested SKU families and
+whose location is in the target region list. Adds a `VMInventory` sheet and
+a `DeployedVmCount` column to the `Summary` sheet.
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -SkusCsv          ./templates/skus.csv `
+    -IncludeVmInventory
+```
+
+Under the hood: one **Azure Resource Graph** POST covers all subscriptions
+in a single call (paginated with `$skipToken` past 1000 rows). The KQL
+query unions `microsoft.compute/virtualmachines` and
+`microsoft.compute/virtualmachinescalesets`, filters to the target sizes /
+regions, and projects a common column set. The extra network cost is
+usually well under a second, but the switch is opt-in so nothing extra runs
+unless you ask.
+
+**Columns in the `VMInventory` sheet:**
+
+| Column | Meaning |
+| --- | --- |
+| `SubscriptionId`, `SubscriptionName` | consistent identity block |
+| `ResourceGroup`, `VmName`, `ResourceId` | ARM identity of the resource |
+| `Region` | e.g. `eastus2` |
+| `VmSize` | e.g. `Standard_D4ds_v5` |
+| `Family`, `FamilyKey` | joined from the compute SKU catalog |
+| `Zone` | `1`, `2`, `3`, or `Regional` (no zone binding) |
+| `PowerState` | `running`, `deallocated`, etc.; `(scale-set)` for a VMSS row; `(unknown)` if Resource Graph has no `instanceView` for the sub yet |
+| `Deployment` | `VM` for single VMs, `VMSS` for scale sets |
+| `InstanceCount` | `1` for a plain VM, `sku.capacity` for a VMSS |
+
+**How the `Summary` sheet uses it:**
+
+- `DeployedVmCount` is a per-(Sub × Region × Family) sum of `InstanceCount`
+  across every inventory row that matched. Useful to compare "quota
+  allocated" vs "actually running": a family with 100 vCPU of quota and
+  `DeployedVmCount = 0` is idle capacity; a family with 800 vCPU of quota
+  and 500 running is nearly saturated.
+- When the switch isn't passed, `DeployedVmCount` is `0` for every row.
+
+**Caveats:**
+
+- `PowerState` comes from `properties.extended.instanceView.powerState.code`
+  in Resource Graph. On some subs (typically fresh ones) that field is empty
+  and the column reads `(unknown)`. That's not a QuotaRecon bug — Resource
+  Graph just hasn't collected instanceView for that sub yet.
+- A VMSS is emitted as **one row** representing the whole scale set with
+  `InstanceCount = sku.capacity`. Per-instance rows would require an extra
+  ARM enumeration per VMSS and are on the roadmap for a later release.
+
 ### Reference data (regions + all VM SKUs)
 
 Under `references/` you'll find two CSVs generated from the live Azure
@@ -250,14 +306,17 @@ Standard_M128ms
 
 ## Output workbook
 
-| Sheet          | One row per                          | What it tells you                                                         |
-| -------------- | ------------------------------------ | ------------------------------------------------------------------------- |
-| `Summary`      | Sub × Region × **Family**            | Family quota %, region-wide + per-zone restriction status, physical zones |
-| `Quota`        | Sub × Region × quota counter         | Raw `Microsoft.Compute` usage rows (regional vCPU, family vCPU, etc.)     |
-| `Restrictions` | Sub × Region × Sample size × restriction | Restriction `Type`, `Locations`, `Zones`, `ReasonCode` (one row each) |
-| `ZoneMap`      | Sub × Region × logical zone          | `PhysicalZone` label (e.g. `uksouth-az1`) per sub — from `/locations`     |
-| `Inputs`       | Raw input value                      | What you supplied vs what QuotaRecon normalized it to                     |
-| `Errors`       | Failure                              | Auth, 4xx, unknown region/SKU, etc. — never fails the whole run           |
+| Sheet                     | One row per                              | What it tells you                                                         |
+| ------------------------- | ---------------------------------------- | ------------------------------------------------------------------------- |
+| `Summary`                 | Sub × Region × **Family**                | Family quota %, region-wide + per-zone restriction status, physical zones, group-pool membership, deployed-VM count |
+| `Quota`                   | Sub × Region × quota counter             | Raw `Microsoft.Compute` usage rows (regional vCPU, family vCPU, etc.)     |
+| `Restrictions`            | Sub × Region × Sample size × restriction | Restriction `Type`, `Locations`, `Zones`, `ReasonCode` (one row each)     |
+| `ZoneMap`                 | Sub × Region × logical zone              | `PhysicalZone` label (e.g. `uksouth-az1`) per sub — from `/locations`     |
+| `QuotaGroupLimits`        | MG × Group × Region × Family             | Pool ceiling and current available limit for the Microsoft.Quota group    |
+| `QuotaGroupAllocations`   | MG × Group × Region × Family × Sub       | Per-sub allocation (`Contributed` / `Drawn`) in the group pool            |
+| `VMInventory`             | Deployed VM or VMSS                      | `VmName`, `VmSize`, `Family`, `Zone`, `PowerState` — only when `-IncludeVmInventory` is passed |
+| `Inputs`                  | Raw input value                          | What you supplied vs what QuotaRecon normalized it to                     |
+| `Errors`                  | Failure or skip                          | Auth, 4xx, unregistered providers, unknown regions/SKUs — never fails the whole run |
 
 The `Summary` sheet uses conditional formatting:
 
@@ -265,6 +324,9 @@ The `Summary` sheet uses conditional formatting:
 - **`Regional-Restrictions`**, **`Logical-AZ1-Restrictions`**,
   **`Logical-AZ2-Restrictions`**, **`Logical-AZ3-Restrictions`** —
   green `None`, red `Yes`.
+- **`InQuotaGroup`** — light blue when `Yes`.
+- **`Note`** — free-text explanation when a row's data is missing
+  (e.g. `Microsoft.Compute provider NotRegistered on this subscription`).
 - **`RestrictionSummary`** is a single string that mirrors what
   `az vm list-skus --location <region> --size <sample>` prints, e.g.
   `NotAvailableForSubscription, type: Zone, locations: eastus2, zones: 3,1,2`.

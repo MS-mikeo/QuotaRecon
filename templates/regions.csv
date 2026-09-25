@@ -1,8 +1,5 @@
 Region
 "# One region per line. ARM name (""eastus2"") or display name (""East US 2"")."
 # Case and whitespace are normalized. Blank lines and # comments are ignored.
-uksouth
-ukwest
-eastus
-eastus2
 northeurope
+swedencentral

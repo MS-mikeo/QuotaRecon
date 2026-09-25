@@ -24,7 +24,10 @@ function Write-QRWorkbook {
         [Parameter(Mandatory)] $Restrictions,
         [Parameter(Mandatory)] $ZoneMap,
         [Parameter(Mandatory)] $Inputs,
-        [Parameter(Mandatory)] $Errors
+        [Parameter(Mandatory)] $Errors,
+        $QuotaGroupLimits      = @(),
+        $QuotaGroupAllocations = @(),
+        $VmInventory           = @()
     )
 
     Assert-QRExcelModule
@@ -78,16 +81,27 @@ function Write-QRWorkbook {
                 Add-ConditionalFormatting -Worksheet $ws -Address $range -RuleType Equal -ConditionValue '"Yes"'  -BackgroundColor LightCoral
             }
         }
+
+        # InQuotaGroup column: light-blue fill when 'Yes'.
+        $qgCol = _Col 'InQuotaGroup'
+        if ($qgCol) {
+            $range = "$([OfficeOpenXml.ExcelCellAddress]::GetColumnLetter($qgCol))2:" +
+                     "$([OfficeOpenXml.ExcelCellAddress]::GetColumnLetter($qgCol))$rowCount"
+            Add-ConditionalFormatting -Worksheet $ws -Address $range -RuleType Equal -ConditionValue '"Yes"' -BackgroundColor LightBlue
+        }
     }
     Close-ExcelPackage $pkg
 
     # --- Remaining sheets ---
     $rest = @(
-        @{ Name = 'Quota';        Data = $Quota },
-        @{ Name = 'Restrictions'; Data = $Restrictions },
-        @{ Name = 'ZoneMap';      Data = $ZoneMap },
-        @{ Name = 'Inputs';       Data = $Inputs },
-        @{ Name = 'Errors';       Data = $Errors }
+        @{ Name = 'Quota';                 Data = $Quota },
+        @{ Name = 'Restrictions';          Data = $Restrictions },
+        @{ Name = 'ZoneMap';               Data = $ZoneMap },
+        @{ Name = 'QuotaGroupLimits';      Data = $QuotaGroupLimits },
+        @{ Name = 'QuotaGroupAllocations'; Data = $QuotaGroupAllocations },
+        @{ Name = 'VMInventory';           Data = $VmInventory },
+        @{ Name = 'Inputs';                Data = $Inputs },
+        @{ Name = 'Errors';                Data = $Errors }
     )
     foreach ($sheet in $rest) {
         $rows = if ($sheet.Data -and $sheet.Data.Count) { $sheet.Data } else { @([pscustomobject]@{}) }
