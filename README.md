@@ -5,6 +5,9 @@
 **Reconnaissance for Azure compute quota, SKU restrictions, and availability-zone
 mappings across many subscriptions, regions, and SKUs — in one Excel workbook.**
 
+> **Current release:** see [CHANGELOG.md](CHANGELOG.md). Every run prints the
+> version at the top; `./Invoke-QuotaRecon.ps1 -Version` prints and exits.
+
 > ⚠️ **Not a Microsoft product.** QuotaRecon is a personal open-source
 > project maintained in an individual capacity. It is not affiliated with,
 > endorsed by, or supported by Microsoft. It is provided **"AS IS"** under
@@ -181,6 +184,64 @@ Add `-DiagnosticLog` to any invocation to write a full transcript log
 `<OutputPath>.log`. Useful for reproducing a weird result. Do not share the
 log file without redacting — it contains subscription GUIDs.
 
+### Group quotas (opt-in)
+
+[Microsoft.Quota group quotas](https://learn.microsoft.com/azure/quotas/quota-groups)
+(pooled vCPU allocations across subscriptions in a Management Group) are
+**opt-in** as of **v1.1.0**. Pass `-IncludeQuotaGroups` to enumerate every
+MG the caller can see and probe each, or `-QuotaGroupMgIds` to narrow the
+probe to specific MGs (which also implies opt-in).
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.local.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -SkusCsv          ./templates/skus.csv `
+    -IncludeQuotaGroups
+```
+
+When the switch isn't passed, the `QuotaGroupLimits` and
+`QuotaGroupAllocations` sheets are empty and the `InQuotaGroup` column on
+`Summary` reads `No` on every row. `-SkipQuotaGroups` is still accepted
+for backward compatibility and now acts as a no-op (default is already
+skip).
+
+### Invalid input callouts
+
+QuotaRecon prints every unresolved subscription GUID, region, and SKU
+(including family entries that didn't match anything in the live catalog)
+to the console as a `WARNING` before the collection phase begins. The same
+rows also appear on the `Inputs` sheet. On the `Summary` sheet, rows where
+the family's sample size isn't offered in a particular region now show
+`N/A` (uncoloured) for the restriction columns instead of `None` (green),
+so you can tell at a glance that there's no data for that family in that
+(sub, region).
+
+### All SKUs in region (opt-in)
+
+Add `-IncludeAllSKUs` to any invocation to **ignore** the Skus / SkusCsv
+input and instead enumerate every VM family present in the union of the
+target regions' `Microsoft.Compute/skus` catalogs. One Summary row per
+`(Sub × Region × Family)` for everything Azure offers you in those
+regions. Useful for a wide-angle scan when you don't have a pre-built SKU
+list, or just want to see what's broadly available.
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.local.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -IncludeAllSKUs
+```
+
+You can combine it with a Skus list — in that case, user-supplied families
+keep whichever `SampleSize` you asked for, and the catalog adds every
+other family on top. Catalog-sourced rows show `SampleSizeSource = catalog`
+on the `Inputs` sheet so you can tell which rows came from the switch.
+
+> Scale note: this can produce a lot of rows (dozens of families × every
+> sub × every region). The script still caches catalogs per `(sub, region)`
+> so it's one extra `/skus` enumeration up front, not one per family.
+
 ### VM inventory (opt-in)
 
 Add `-IncludeVmInventory` to any invocation to list every deployed VM and
@@ -323,10 +384,21 @@ The `Summary` sheet uses conditional formatting:
 - **`MaxUsagePercent`** — yellow ≥ 80 %, red ≥ 95 %.
 - **`Regional-Restrictions`**, **`Logical-AZ1-Restrictions`**,
   **`Logical-AZ2-Restrictions`**, **`Logical-AZ3-Restrictions`** —
-  green `None`, red `Yes`.
+  three-value cells:
+  - `None` → **green** (offered and unrestricted)
+  - `Yes` → **red** (offered but restricted)
+  - `N/A` → **uncoloured** (not offered in this zone / region at all,
+    or the family has zero sizes in this region's catalog)
 - **`InQuotaGroup`** — light blue when `Yes`.
-- **`Note`** — free-text explanation when a row's data is missing
-  (e.g. `Microsoft.Compute provider NotRegistered on this subscription`).
+- **`Note`** — free-text explanation when a row's data is missing or a
+  fallback was used (e.g. `Family 'standardDCSv3Family' has no sizes offered
+  in australiasoutheast`, `Sample size 'Standard_DC2s_v3' not offered in X;
+  probed 'Standard_DC1s_v3' instead`, `Microsoft.Compute provider
+  NotRegistered on this subscription`).
+- **`OfferedSizesInRegion`** — how many sizes in the family exist in that
+  region's resourceSkus catalog. `0` means the family isn't offered there.
+- **`ProbeSampleUsed`** — the SKU name actually used to probe restrictions.
+  If it differs from `SampleSize`, the Note explains why.
 - **`RestrictionSummary`** is a single string that mirrors what
   `az vm list-skus --location <region> --size <sample>` prints, e.g.
   `NotAvailableForSubscription, type: Zone, locations: eastus2, zones: 3,1,2`.
@@ -345,10 +417,15 @@ The `Summary` sheet uses conditional formatting:
   `Regional-Restrictions` column reads `Yes` with reason
   `Sample size 'X' not offered in <region>`.
 - **"Which zones?"** — The `Microsoft.Compute/skus` response includes
-  `locationInfo[].zones` and a `restrictions[]` array. A `Zone`-type
-  restriction flags the specific logical zones in
-  `Logical-AZn-Restrictions`. A `Location`-type restriction is region-wide
-  and flags `Regional-Restrictions = Yes` AND all three logical zones.
+  `locationInfo[].zones` and a `restrictions[]` array. Each logical zone
+  cell resolves to one of three values:
+  - `N/A` if the probe SKU isn't offered in that logical zone
+    (`locationInfo[].zones` doesn't contain it) — e.g. a Confidential
+    Compute SKU that's only in zone 1.
+  - `Yes` if the zone is offered but a `Zone`-type restriction fires.
+  - `None` if the zone is offered and has no restriction.
+  A `Location`-type restriction is region-wide: it flags
+  `Regional-Restrictions = Yes` AND all three logical zones.
 - **"Logical → physical zones?"** — Calls
   `GET /subscriptions/{sub}/locations?api-version=2022-12-01` and reads the
   `availabilityZoneMappings` array on each region entry, which gives the
@@ -402,3 +479,31 @@ https://github.com/MS-mikeo/QuotaRecon/issues with:
 2. The row from the `Summary` or `Errors` sheet that looks wrong.
 3. If possible, the `.log` file produced by `-DiagnosticLog`
    (scrub any real subscription IDs first).
+
+---
+
+## Versioning and changelog
+
+QuotaRecon follows [Semantic Versioning](https://semver.org/)
+(`MAJOR.MINOR.PATCH`). The current version is stored in `$script:QRVersion`
+in [Invoke-QuotaRecon.ps1](Invoke-QuotaRecon.ps1), printed at the top of
+every run, and surfaced via `-Version`.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full per-release history.
+
+**Bumping the version (when you make a change):**
+
+- **PATCH** (`1.1.2 → 1.1.3`) — bug fixes, no new columns, no new behaviour.
+- **MINOR** (`1.1.x → 1.2.0`) — new features, new switches, new Summary
+  columns, or any change in default behaviour.
+- **MAJOR** (`1.x.x → 2.0.0`) — a change that breaks existing invocations
+  or renames/removes output columns people depend on.
+
+When you bump the version:
+1. Edit `$script:QRVersion = '...'` in [Invoke-QuotaRecon.ps1](Invoke-QuotaRecon.ps1).
+2. Add a new section at the top of [CHANGELOG.md](CHANGELOG.md) with the
+   date and 2–4 plain-English bullets under `Added`, `Changed`, `Fixed`,
+   or `Removed`.
+3. Run `pwsh -NoProfile -File tools/Test-Syntax.ps1` to parse-check every
+   script, and run `./Invoke-QuotaRecon.ps1` end-to-end against your
+   `templates/subscriptions.local.csv` to confirm the workbook still opens.

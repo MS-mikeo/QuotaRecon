@@ -53,6 +53,8 @@
 
 .NOTES
     Requires: Az.Accounts + ImportExcel modules. Run Connect-AzAccount first.
+    Version is tracked in $script:QRVersion below and printed at the top of
+    every run so support tickets reference the exact build the user ran.
 #>
 [CmdletBinding()]
 param(
@@ -71,11 +73,13 @@ param(
     # unexpected results. Zero overhead when not set.
     [switch]   $DiagnosticLog,
 
-    # Group Quota discovery controls. Default behavior is AUTO — every
-    # Management Group the caller can see is probed for group quotas, and
-    # subscription names are resolved for any sub referenced by a group
-    # (even subs not in the input list). Pass -QuotaGroupMgIds to narrow
-    # the probe to specific MGs, or -SkipQuotaGroups to opt out entirely.
+    # Group Quota discovery is OPT-IN as of v1.1.0. Pass -IncludeQuotaGroups
+    # to enumerate every Management Group the caller can see and probe each
+    # for group quotas. Narrow the probe to specific MGs with
+    # -QuotaGroupMgIds (which also implies opt-in). -SkipQuotaGroups is
+    # accepted for backward compatibility but is now a no-op because the
+    # default is already "skipped".
+    [switch]   $IncludeQuotaGroups,
     [string[]] $QuotaGroupMgIds,
     [switch]   $SkipQuotaGroups,
 
@@ -83,10 +87,34 @@ param(
     # (and VMSS) whose vmSize is in one of the requested SKU families and
     # whose location is in the target region list. Adds a VMInventory sheet
     # and a DeployedVmCount column to Summary. One extra ARM POST per page.
-    [switch]   $IncludeVmInventory
+    [switch]   $IncludeVmInventory,
+
+    # Opt-in: ignore the Skus / SkusCsv input and instead enumerate every
+    # virtualMachine family present in the union of the target regions'
+    # Microsoft.Compute/skus catalogs. User-supplied SKUs (if any) still
+    # participate and 'win' on sample-size when there's overlap. Useful
+    # for a wide-angle scan: 'show me everything Azure offers me in these
+    # regions, with quota + restrictions.'
+    [switch]   $IncludeAllSKUs,
+
+    # Prints the QuotaRecon version and exits. Handy for support tickets.
+    [switch]   $Version
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ---------- Version ----------------------------------------------------
+# Bump on every behavioural change. Printed at the top of every run and
+# shown by -Version. SemVer: MAJOR.MINOR.PATCH.
+$script:QRVersion = '1.2.0'
+
+if ($Version) {
+    Write-Host ("QuotaRecon v{0}" -f $script:QRVersion)
+    return
+}
+
+Write-Host ("")
+Write-Host ("[QuotaRecon] v{0}" -f $script:QRVersion) -ForegroundColor Green
 
 # ---------- Load modules ------------------------------------------------
 $here = Split-Path -Parent $PSCommandPath
@@ -164,14 +192,16 @@ if ($Skus) {
     $rawSkus = Read-QRList -Inline $Skus -ColumnName 'Sku'
 } elseif ($SkusCsv) {
     $rawSkus = Read-QRList -CsvPath $SkusCsv -ColumnName 'Sku'
-} else {
+} elseif (-not $IncludeAllSKUs) {
+    # Skip the interactive prompt when -IncludeAllSKUs is set; the catalog
+    # itself provides the SKU list.
     $answer = Read-Host "SKUs (comma separated)"
     $rawSkus = Read-QRList -Inline @($answer) -ColumnName 'Sku'
 }
 
 if (-not $rawSubs)    { throw "No subscriptions supplied." }
 if (-not $rawRegions) { throw "No regions supplied." }
-if (-not $rawSkus)    { throw "No SKUs supplied." }
+if (-not $rawSkus -and -not $IncludeAllSKUs) { throw "No SKUs supplied. (Pass -IncludeAllSKUs to enumerate every family in the target regions.)" }
 
 # ---------- Normalize ---------------------------------------------------
 Write-Host "[QuotaRecon] Normalizing subscriptions/regions/SKUs..." -ForegroundColor Cyan
@@ -241,7 +271,47 @@ $regRes = Resolve-QRRegions -Raw $rawRegions -ProbeSubscriptionId $probeSub
 $validRegions = @($regRes | Where-Object Valid | Select-Object -ExpandProperty Normalized | Select-Object -Unique)
 if (-not $validRegions) { throw "No valid regions supplied." }
 
-$skuRes = Resolve-QRSkus -Raw $rawSkus -ProbeSubscriptionId $probeSub -Regions $validRegions
+$skuRes = @()
+if ($rawSkus -and $rawSkus.Count -gt 0) {
+    $skuRes = Resolve-QRSkus -Raw $rawSkus -ProbeSubscriptionId $probeSub -Regions $validRegions
+}
+
+# -IncludeAllSKUs: enumerate every virtualMachine family present in the
+# union of the target regions' resourceSkus catalogs and append them to
+# $skuRes. User-supplied families (if any) stay first in the list so they
+# win on sample-size when there's overlap (see dedup loop below).
+if ($IncludeAllSKUs) {
+    Write-Host "[QuotaRecon] -IncludeAllSKUs: enumerating every family from region catalogs..." -ForegroundColor Cyan
+    $catalogSkuRes = Get-QRAllFamiliesFromRegions -ProbeSubscriptionId $probeSub -Regions $validRegions
+    Write-Host ("[QuotaRecon]   catalog families found: {0}" -f @($catalogSkuRes).Count) -ForegroundColor DarkCyan
+    $skuRes = @($skuRes) + @($catalogSkuRes)
+}
+
+# ---------- Call out invalid inputs to the console --------------------
+# Users were missing invalid SKUs because they only showed up on the Inputs
+# sheet. Repeat them on stdout so a quick skim of the terminal catches
+# typos before anyone opens the workbook.
+$invalidSubRows    = @($subRes | Where-Object { -not $_.Valid })
+$invalidRegionRows = @($regRes | Where-Object { -not $_.Valid })
+$invalidSkuRows    = @($skuRes | Where-Object { -not $_.Valid })
+if ($invalidSubRows.Count -gt 0) {
+    Write-Warning ("[QuotaRecon] {0} invalid subscription(s) ignored (see Inputs sheet):" -f $invalidSubRows.Count)
+    foreach ($row in $invalidSubRows) {
+        Write-Host ("    - '{0}' -> {1}" -f $row.Raw, $row.Reason) -ForegroundColor Yellow
+    }
+}
+if ($invalidRegionRows.Count -gt 0) {
+    Write-Warning ("[QuotaRecon] {0} invalid region(s) ignored (see Inputs sheet):" -f $invalidRegionRows.Count)
+    foreach ($row in $invalidRegionRows) {
+        Write-Host ("    - '{0}' -> {1}" -f $row.Raw, $row.Reason) -ForegroundColor Yellow
+    }
+}
+if ($invalidSkuRows.Count -gt 0) {
+    Write-Warning ("[QuotaRecon] {0} invalid SKU/family entry(ies) ignored (see Inputs sheet):" -f $invalidSkuRows.Count)
+    foreach ($row in $invalidSkuRows) {
+        Write-Host ("    - '{0}' -> {1}" -f $row.Raw, $row.Reason) -ForegroundColor Yellow
+    }
+}
 
 # The resolver now returns one row per user-supplied entry, already aggregated
 # to family level. If the user supplied both a family and a specific size in
@@ -319,17 +389,23 @@ foreach ($region in $validRegions) {
     }
 }
 
-# ---------- Group Quotas (auto-discover by default) --------------------
-# Default: enumerate every MG the caller can see and probe each. Users can
-# override with -QuotaGroupMgIds to narrow the probe, or -SkipQuotaGroups to
-# opt out entirely. After collection, every unique sub ID referenced by any
-# group is added to the name resolver, so allocation rows carry real names
-# even for subs the user didn't put in the input list.
+# ---------- Group Quotas (opt-in) --------------------------------------
+# As of v1.1.0 Group Quota discovery is OPT-IN. Pass -IncludeQuotaGroups to
+# enumerate every MG the caller can see and probe each, or -QuotaGroupMgIds
+# to narrow the probe to specific MGs (which also implies opt-in). After
+# collection, every unique sub ID referenced by any group is added to the
+# name resolver so allocation rows carry real names even for subs the user
+# didn't put in the input list. -SkipQuotaGroups is kept as a no-op for
+# backward compat.
 $quotaGroupGroups      = @()
 $quotaGroupLimits      = @()
 $quotaGroupAllocations = @()
 $quotaGroupIndex       = @{}
-if (-not $SkipQuotaGroups) {
+$runQuotaGroups = ($IncludeQuotaGroups -or ($QuotaGroupMgIds -and $QuotaGroupMgIds.Count -gt 0)) -and (-not $SkipQuotaGroups)
+if ($SkipQuotaGroups -and $IncludeQuotaGroups) {
+    Write-Warning "[QuotaRecon] -SkipQuotaGroups overrides -IncludeQuotaGroups; group quotas will NOT be collected."
+}
+if ($runQuotaGroups) {
     $mgProbeList = @()
     if ($QuotaGroupMgIds -and $QuotaGroupMgIds.Count -gt 0) {
         $mgProbeList = @($QuotaGroupMgIds)
@@ -445,10 +521,45 @@ foreach ($sub in $validSubs) {
             $sample    = $famRow.SampleSize
             $sampleSrc = $famRow.SampleSizeSource
 
-            # Restriction / zone probe: use the sample size's resourceSkus row.
-            $skuRow = $null
+            # Family-aware probe:
+            #   1. Pull the full resourceSkus catalog for this (sub, region).
+            #   2. Filter to every size whose family key matches $famKey.
+            #   3. If zero sizes offered -> family not available in this
+            #      region at all (common for Confidential Compute, M-series,
+            #      HPC families in secondary regions).
+            #   4. Otherwise prefer the pre-picked sample; if that specific
+            #      size isn't in this region's catalog but a sibling size
+            #      is, fall back to the smallest-vCPU sibling as the probe
+            #      and record the swap in the Note column.
+            $skuRow           = $null
+            $effectiveSample  = $sample
+            $sampleFallback   = $false
+            $offeredCount     = 0
+            $offeredNames     = @()
             try {
-                $skuRow = Get-QRSkuRow -SubscriptionId $sub -Region $region -SkuName $sample
+                $catalog = Get-QRComputeSkuCatalog -SubscriptionId $sub -Region $region
+                $famOfferings = @($catalog | Where-Object {
+                    $_.resourceType -eq 'virtualMachines' -and
+                    $_.family -and
+                    (Get-QRFamilyLookupKey -Family $_.family) -eq $famKey
+                })
+                $offeredCount = $famOfferings.Count
+                $offeredNames = @($famOfferings | ForEach-Object { $_.name } | Sort-Object)
+
+                if ($offeredCount -gt 0) {
+                    $skuRow = $famOfferings | Where-Object { $_.name -eq $sample } | Select-Object -First 1
+                    if (-not $skuRow) {
+                        $skuRow = $famOfferings | Sort-Object `
+                            @{Expression={
+                                $v = @($_.capabilities | Where-Object { $_.name -eq 'vCPUs' } | Select-Object -First 1)
+                                if ($v) { [int]$v[0].value } else { [int]::MaxValue }
+                            }}, @{Expression={ $_.name }} | Select-Object -First 1
+                        if ($skuRow) {
+                            $effectiveSample = $skuRow.name
+                            $sampleFallback  = $true
+                        }
+                    }
+                }
             }
             catch {
                 $errors.Add([pscustomobject]@{
@@ -457,7 +568,7 @@ foreach ($sub in $validSubs) {
                 })
             }
 
-            # Restrictions (from the sample size).
+            # Restrictions (from the effective sample size).
             $skuRestr = @()
             $notAvailForSub = $false
             if ($skuRow) {
@@ -490,10 +601,42 @@ foreach ($sub in $validSubs) {
                 }
             }
             $restrictionSummaryText = ($restrLines -join '; ')
-            $regionalStatus = if ($regionalRestricted) { 'Yes' } else { 'None' }
+            # Decide restriction cell values:
+            #   * $offeredCount == 0 -> family not offered in this region
+            #     at all. All restriction cells = 'N/A' so the Summary CF
+            #     leaves them uncoloured; the Note explains why.
+            #   * Otherwise walk each logical zone:
+            #       - zone not in locationInfo[].zones -> 'N/A' (SKU is not
+            #         deployable in that zone at all; Azure doesn't emit a
+            #         restrictions[] row for it, it's just absent).
+            #       - zone offered and listed in a Zone restriction -> 'Yes'
+            #       - zone offered and unrestricted -> 'None'
+            #     Regional status is 'Yes' if ANY Location-type restriction
+            #     fires, 'None' otherwise.
             $azStatus = @{}
-            foreach ($z in @('1','2','3')) {
-                $azStatus[$z] = if ($zoneRestricted[$z]) { 'Yes' } else { 'None' }
+            if ($offeredCount -eq 0) {
+                $regionalStatus = 'N/A'
+                foreach ($z in @('1','2','3')) { $azStatus[$z] = 'N/A' }
+            } else {
+                $regionalStatus = if ($regionalRestricted) { 'Yes' } else { 'None' }
+                # Build the set of logical zones this probe row is actually
+                # offered in. For non-AZ regions or non-zonal SKUs this will
+                # be empty and all three zone cells read 'N/A'.
+                $offeredZones = @{}
+                foreach ($li in @($skuRow.locationInfo)) {
+                    foreach ($z in @($li.zones)) {
+                        if ($z) { $offeredZones[[string]$z] = $true }
+                    }
+                }
+                foreach ($z in @('1','2','3')) {
+                    if (-not $offeredZones.ContainsKey($z)) {
+                        $azStatus[$z] = 'N/A'
+                    } elseif ($zoneRestricted[$z]) {
+                        $azStatus[$z] = 'Yes'
+                    } else {
+                        $azStatus[$z] = 'None'
+                    }
+                }
             }
 
             # Quota is per-family, looked up directly by the FamilyKey against
@@ -539,8 +682,11 @@ foreach ($sub in $validSubs) {
             if ($computeProviderState[$sub] -eq 'NotRegistered') {
                 $noteParts.Add('Microsoft.Compute provider NotRegistered on this subscription') | Out-Null
             }
-            if (-not $skuRow -and $computeProviderState[$sub] -ne 'NotRegistered') {
-                $noteParts.Add(("Sample size '{0}' not offered in {1}" -f $sample, $region)) | Out-Null
+            if ($offeredCount -eq 0 -and $computeProviderState[$sub] -ne 'NotRegistered') {
+                $noteParts.Add(("Family '{0}' has no sizes offered in {1}" -f $fam, $region)) | Out-Null
+            }
+            elseif ($sampleFallback) {
+                $noteParts.Add(("Sample size '{0}' not offered in {1}; probed '{2}' instead" -f $sample, $region, $effectiveSample)) | Out-Null
             }
             if ($notAvailForSub) {
                 $noteParts.Add('NotAvailableForSubscription for this SKU') | Out-Null
@@ -555,6 +701,8 @@ foreach ($sub in $validSubs) {
                 FamilyKey                   = $famKey
                 SampleSize                  = $sample
                 SampleSizeSource            = $sampleSrc
+                ProbeSampleUsed             = $effectiveSample
+                OfferedSizesInRegion        = $offeredCount
                 Note                        = $noteText
                 FamilyUsed                  = $familyConv.CurrentValue
                 FamilyLimit                 = $familyConv.Limit
@@ -598,12 +746,18 @@ Write-Host ""
 Write-Host "[QuotaRecon] Done." -ForegroundColor Green
 Write-Host ("  Subscriptions      : {0} valid / {1} supplied" -f $validSubs.Count,    $rawSubs.Count)
 Write-Host ("  Regions            : {0} valid / {1} supplied" -f $validRegions.Count, $rawRegions.Count)
-Write-Host ("  Families           : {0} valid / {1} supplied" -f $familyRows.Count,   $rawSkus.Count)
+if ($IncludeAllSKUs) {
+    Write-Host ("  Families           : {0} valid ({1} user-supplied + catalog-enumerated)" -f $familyRows.Count, @($rawSkus).Count)
+} else {
+    Write-Host ("  Families           : {0} valid / {1} supplied" -f $familyRows.Count,   $rawSkus.Count)
+}
 Write-Host ("  Summary rows       : {0}" -f $summary.Count)
-if (-not $SkipQuotaGroups) {
+if ($runQuotaGroups) {
     Write-Host ("  Quota groups       : {0}" -f $quotaGroupGroups.Count)
     Write-Host ("  Group limit rows   : {0}" -f $quotaGroupLimits.Count)
     Write-Host ("  Group alloc rows   : {0}" -f $quotaGroupAllocations.Count)
+} else {
+    Write-Host ("  Quota groups       : skipped (pass -IncludeQuotaGroups to collect)") -ForegroundColor DarkGray
 }
 if ($IncludeVmInventory) {
     Write-Host ("  VM inventory rows  : {0}" -f @($vmInventory).Count)

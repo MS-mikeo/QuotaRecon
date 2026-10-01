@@ -158,3 +158,68 @@ function Get-QRSkuZonesAvailable {
     $result = [string[]]@($offered | Where-Object { $restrictedZones -notcontains $_ } | Sort-Object)
     return ,$result
 }
+
+function Get-QRAllFamiliesFromRegions {
+    <#
+    .SYNOPSIS
+        Enumerates every virtualMachine family present in the union of the
+        resourceSkus catalogs for the supplied regions, and returns one row
+        per unique family in the same shape Resolve-QRSkus produces.
+        Used by Invoke-QuotaRecon's -IncludeAllSKUs switch to report on
+        everything Azure offers in the target regions without a user list.
+
+    .OUTPUTS
+        pscustomobject rows with:
+            Kind='Sku', Raw='(all-skus)', Family, FamilyKey, SampleSize,
+            SampleSizeSource='catalog', Valid=$true, Reason
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]   $ProbeSubscriptionId,
+        [Parameter(Mandatory)][string[]] $Regions
+    )
+
+    $familyRaw     = @{}  # familyKey -> raw family string
+    $familyByKey   = @{}  # familyKey -> List[string] of size names
+    $vcpuOfSize    = @{}  # size name  -> vCPU count
+
+    foreach ($region in $Regions) {
+        $catalog = Get-QRComputeSkuCatalog -SubscriptionId $ProbeSubscriptionId -Region $region
+        foreach ($sku in $catalog) {
+            if ($sku.resourceType -ne 'virtualMachines') { continue }
+            if (-not $sku.family) { continue }
+            $fk = Get-QRFamilyLookupKey -Family $sku.family
+            if (-not $familyRaw.ContainsKey($fk))   { $familyRaw[$fk]   = $sku.family }
+            if (-not $familyByKey.ContainsKey($fk)) {
+                $familyByKey[$fk] = New-Object System.Collections.Generic.List[string]
+            }
+            if ($familyByKey[$fk] -notcontains $sku.name) {
+                $familyByKey[$fk].Add($sku.name) | Out-Null
+            }
+            if (-not $vcpuOfSize.ContainsKey($sku.name)) {
+                $vCap = @($sku.capabilities | Where-Object { $_.name -eq 'vCPUs' } | Select-Object -First 1)
+                $vcpuOfSize[$sku.name] = if ($vCap) { [int]$vCap[0].value } else { [int]::MaxValue }
+            }
+        }
+    }
+
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($fk in ($familyByKey.Keys | Sort-Object)) {
+        $sizes = @($familyByKey[$fk])
+        $sample = $sizes | Sort-Object `
+            @{Expression={ $vcpuOfSize[$_] }}, `
+            @{Expression={ $_ }} | Select-Object -First 1
+        $out.Add([pscustomobject]@{
+            Kind             = 'Sku'
+            Raw              = '(all-skus)'
+            Family           = $familyRaw[$fk]
+            FamilyKey        = $fk
+            SampleSize       = $sample
+            SampleSizeSource = 'catalog'
+            Valid            = $true
+            Reason           = ("catalog-enumerated; smallest of {0} sibling(s)" -f $sizes.Count)
+        }) | Out-Null
+    }
+    return ,$out.ToArray()
+}
+
