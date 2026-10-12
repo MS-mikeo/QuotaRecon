@@ -13,6 +13,67 @@ available via:
 
 ---
 
+## [1.5.0] - 2026-10-12
+
+### Added
+
+- **`-OnlyContainerAppsQuota` switch** — fast-path mode that implies
+  `-IncludeContainerAppsQuota` and skips everything unrelated: SKU
+  resolution/prompt, Microsoft.Compute provider checks, the zone map,
+  Group Quotas, VM Inventory, and the Summary/Quota/Restrictions
+  collection. Only Subscriptions and Regions are needed.
+- **Output workbook trimming for `-Only<Service>` switches** —
+  `Write-QRWorkbook` now accepts an `-OnlySheets` list; when non-empty,
+  every sheet not in that list (other than the always-present
+  `Inputs`/`Errors`) is omitted entirely rather than written out empty.
+  `-OnlyContainerAppsQuota` uses this to produce a minimal 4-sheet
+  workbook: `ContainerAppsQuota`, `ContainerAppsEnvQuota`, `Inputs`,
+  `Errors`. This is the template mechanism for future `-Only<Service>`
+  switch additions — see `.github/copilot-instructions.md`.
+
+### Changed
+
+- **`QuotaGroupLimits` and `QuotaGroupAllocations` sheets are now omitted
+  entirely** from the output workbook when quota groups weren't collected
+  (`-IncludeQuotaGroups` / `-QuotaGroupMgIds` not passed), instead of being
+  included empty with no header row. No change when those switches are
+  used — both sheets are populated as before.
+
+## [1.4.0] - 2026-10-12
+
+### Changed
+
+- **`-IncludeContainerAppsQuota` now collects BOTH Container Apps quota
+  sheets** — subscription/region-scoped quota (`ContainerAppsQuota`) and
+  per-managed-environment workload-profile core quota
+  (`ContainerAppsEnvQuota`: Consumption, General Purpose/D-series, Memory
+  Optimized/E-series, GPU cores), discovered via one Azure Resource Graph
+  query (same approach as `-IncludeVmInventory`) plus one usages call per
+  environment found. This is what actually answers "how many D-series
+  cores are available" — that number lives on a specific managed
+  environment, not the subscription or region. One switch now covers the
+  whole feature instead of splitting it across two opt-ins, since users
+  think of "Container Apps quota" as one thing.
+- If no managed environments exist for the specified
+  subscriptions/regions, that's now noted as a row on the `Errors` sheet
+  (not just a console message) so it's visible to anyone who only opens
+  the workbook. `ContainerAppsQuota` is still collected regardless; no
+  error is raised.
+
+## [1.3.0] - 2026-10-12
+
+### Added
+
+- **`-IncludeContainerAppsQuota` switch** — adds a `ContainerAppsQuota`
+  sheet with Azure Container Apps subscription/region-scoped quota
+  (Managed Environment Count, Session Pools, Subscription NCA100 GPUs) for
+  every target Sub x Region. Reads the Microsoft.Quota provider under the
+  Microsoft.App namespace — no new module or CLI dependency. Does **not**
+  cover per-managed-environment workload-profile core quota (Consumption,
+  General Purpose/D-series, Memory Optimized/E-series, GPU); those require
+  enumerating Container Apps environments and are planned for a future
+  release.
+
 ## [1.2.0] - 2026-10-01
 
 ### Added
@@ -88,6 +149,9 @@ available via:
 - Templates under `templates/` and read-only reference catalogs under
   `references/`.
 
+[1.5.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.5.0
+[1.4.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.4.0
+[1.3.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.3.0
 [1.2.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.2.0
 [1.1.2]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.1.2
 [1.1.1]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.1.1

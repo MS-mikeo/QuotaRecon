@@ -28,6 +28,14 @@ QuotaRecon answers the questions that come up on every capacity call:
    Calls `Microsoft.Resources/checkZonePeers` and produces a logical → physical
    zone map per Sub × Region, so you can reason about co-location across
    subscriptions.
+4. **(Opt-in) What Azure Container Apps quota do I have, subscription-wide
+   and per environment?**
+   Reads the `Microsoft.Quota` provider for subscription/region-scoped
+   limits (Managed Environment Count, Session Pools, NCA100 GPUs) and
+   discovers every managed environment via Resource Graph for
+   per-environment workload-profile core quota (Consumption, D-series,
+   E-series, GPU). See `-IncludeContainerAppsQuota` /
+   `-OnlyContainerAppsQuota` below.
 
 Output is a single `.xlsx` with one worksheet per concern plus a rolled-up
 `Summary` sheet suitable for review or handoff.
@@ -201,10 +209,11 @@ probe to specific MGs (which also implies opt-in).
 ```
 
 When the switch isn't passed, the `QuotaGroupLimits` and
-`QuotaGroupAllocations` sheets are empty and the `InQuotaGroup` column on
-`Summary` reads `No` on every row. `-SkipQuotaGroups` is still accepted
-for backward compatibility and now acts as a no-op (default is already
-skip).
+`QuotaGroupAllocations` sheets are **omitted from the workbook entirely**
+(as of v1.5.0 — previously they were included but empty) and the
+`InQuotaGroup` column on `Summary` reads `No` on every row.
+`-SkipQuotaGroups` is still accepted for backward compatibility and now
+acts as a no-op (default is already skip).
 
 ### Invalid input callouts
 
@@ -298,6 +307,94 @@ unless you ask.
   `InstanceCount = sku.capacity`. Per-instance rows would require an extra
   ARM enumeration per VMSS and are on the roadmap for a later release.
 
+### Azure Container Apps quota (opt-in)
+
+Add `-IncludeContainerAppsQuota` to any invocation to collect **both**
+Container Apps quota sheets for every target Sub × Region:
+
+- **`ContainerAppsQuota`** — subscription/region-scoped quota (Managed
+  Environment Count, Session Pools, Subscription NCA100 GPUs).
+- **`ContainerAppsEnvQuota`** — per-managed-environment workload-profile
+  core quota: **Consumption Cores**, **General Purpose Cores (D-series)**,
+  **Memory Optimized Cores (E-series)**, and **GPU Cores** (e.g. T4,
+  NCA100), with limit, current usage, and usage %. This is what answers
+  "how many D-series cores are available" — that's
+  `ManagedEnvironmentGeneralPurposeCores` on this sheet, scoped to the
+  environment that owns it. There is no subscription-wide pool for
+  Dedicated workload-profile cores; each managed environment has its own
+  independent cap.
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.local.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -SkusCsv          ./templates/skus.csv `
+    -IncludeContainerAppsQuota
+```
+
+Under the hood: Container Apps doesn't expose a single
+`Microsoft.App/locations/{region}/usages` endpoint the way
+`Microsoft.Compute` does. Subscription/region-scoped limits and current
+usage come from the generic **Microsoft.Quota** resource provider, scoped
+under the `Microsoft.App` namespace — two paged `GET`s per (Sub × Region),
+merged by quota name. Per-environment quota requires discovering which
+managed environments exist first (one Azure Resource Graph query across
+every target subscription, same `Invoke-QRResourceGraph` helper
+`-IncludeVmInventory` uses, filtered to `microsoft.app/managedenvironments`
+resources in the target region list), then one
+`Microsoft.App/managedEnvironments/{name}/usages` call per environment
+found. **If no managed environments exist for the specified
+subscriptions/regions, that's noted on the `Errors` sheet and the console**
+— `ContainerAppsQuota` is still collected regardless, and no error is
+raised. No new module or CLI dependency either way.
+
+**Columns in the `ContainerAppsQuota` sheet:**
+
+| Column | Meaning |
+| --- | --- |
+| `SubscriptionId`, `SubscriptionName`, `Region` | consistent identity block |
+| `Name` | the raw quota item name (e.g. `managedEnvironmentCount`) |
+| `LocalizedName` | the human-readable label shown in the portal |
+| `Unit` | e.g. `Count` |
+| `CurrentValue`, `Limit`, `UsagePercent` | same shape as the `Quota` sheet |
+
+**Columns in the `ContainerAppsEnvQuota` sheet:**
+
+| Column | Meaning |
+| --- | --- |
+| `SubscriptionId`, `SubscriptionName`, `Region` | consistent identity block |
+| `ResourceGroup`, `EnvironmentName` | identifies which Container Apps environment the row belongs to |
+| `Name` | the raw quota item name (e.g. `ManagedEnvironmentGeneralPurposeCores`) |
+| `LocalizedName` | the human-readable label shown in the portal |
+| `Unit` | e.g. `Count` (blank when the API doesn't report a unit for that item) |
+| `CurrentValue`, `Limit`, `UsagePercent` | same shape as the `Quota` sheet |
+
+### Container Apps-only fast path (opt-in)
+
+Add `-OnlyContainerAppsQuota` when all you need is the Container Apps
+quota check and nothing else. It implies `-IncludeContainerAppsQuota`, so
+you don't need to pass both.
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.local.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -OnlyContainerAppsQuota
+```
+
+Notice there's no `-SkusCsv` / `-Skus` in that example — **SKUs aren't
+required or used** in this mode. Everything that doesn't serve the
+Container Apps check is skipped: SKU resolution and the interactive SKU
+prompt, the Microsoft.Compute provider check, the zone map, Group Quotas,
+VM Inventory, and the Summary/Quota/Restrictions collection. Subscriptions
+and regions are still required.
+
+**The output workbook itself is also trimmed down** — instead of the
+usual full sheet set, you get exactly four sheets: `ContainerAppsQuota`,
+`ContainerAppsEnvQuota`, `Inputs`, `Errors`. This is the general pattern
+for every `-Only<Service>` switch: minimal, purpose-driven, fast — both in
+what gets collected and in what shows up in the workbook.
+
 ### Reference data (regions + all VM SKUs)
 
 Under `references/` you'll find two CSVs generated from the live Azure
@@ -373,9 +470,11 @@ Standard_M128ms
 | `Quota`                   | Sub × Region × quota counter             | Raw `Microsoft.Compute` usage rows (regional vCPU, family vCPU, etc.)     |
 | `Restrictions`            | Sub × Region × Sample size × restriction | Restriction `Type`, `Locations`, `Zones`, `ReasonCode` (one row each)     |
 | `ZoneMap`                 | Sub × Region × logical zone              | `PhysicalZone` label (e.g. `uksouth-az1`) per sub — from `/locations`     |
-| `QuotaGroupLimits`        | MG × Group × Region × Family             | Pool ceiling and current available limit for the Microsoft.Quota group    |
-| `QuotaGroupAllocations`   | MG × Group × Region × Family × Sub       | Per-sub allocation (`Contributed` / `Drawn`) in the group pool            |
+| `QuotaGroupLimits`        | MG × Group × Region × Family             | Pool ceiling and current available limit for the Microsoft.Quota group — sheet omitted entirely unless `-IncludeQuotaGroups`/`-QuotaGroupMgIds` is passed |
+| `QuotaGroupAllocations`   | MG × Group × Region × Family × Sub       | Per-sub allocation (`Contributed` / `Drawn`) in the group pool — sheet omitted entirely unless `-IncludeQuotaGroups`/`-QuotaGroupMgIds` is passed |
 | `VMInventory`             | Deployed VM or VMSS                      | `VmName`, `VmSize`, `Family`, `Zone`, `PowerState` — only when `-IncludeVmInventory` is passed |
+| `ContainerAppsQuota`      | Sub × Region × quota item                | Container Apps subscription/region quota (env count, session pools, NCA100 GPUs) — only when `-IncludeContainerAppsQuota` or `-OnlyContainerAppsQuota` is passed |
+| `ContainerAppsEnvQuota`   | Environment × quota item                 | Per-environment Container Apps workload-profile core quota (Consumption, D-series, E-series, GPU) — only when `-IncludeContainerAppsQuota` or `-OnlyContainerAppsQuota` is passed |
 | `Inputs`                  | Raw input value                          | What you supplied vs what QuotaRecon normalized it to                     |
 | `Errors`                  | Failure or skip                          | Auth, 4xx, unregistered providers, unknown regions/SKUs — never fails the whole run |
 
@@ -447,6 +546,9 @@ QuotaRecon/
 │   ├── QuotaRecon.Quota.ps1          # usages calls + family matching
 │   ├── QuotaRecon.Skus.ps1           # resourceSkus + restriction flattening
 │   ├── QuotaRecon.Zones.ps1          # /locations availabilityZoneMappings
+│   ├── QuotaRecon.QuotaGroups.ps1    # Microsoft.Quota group quotas (opt-in)
+│   ├── QuotaRecon.Inventory.ps1      # Resource Graph helper + VM inventory (opt-in)
+│   ├── QuotaRecon.ContainerApps.ps1  # Container Apps quota, sub/region + per-env (opt-in)
 │   └── QuotaRecon.Excel.ps1          # ImportExcel writer + conditional formatting
 ├── templates/
 │   ├── subscriptions.csv             # empty template (safe to publish)

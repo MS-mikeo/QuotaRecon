@@ -27,10 +27,34 @@ function Write-QRWorkbook {
         [Parameter(Mandatory)] $Errors,
         $QuotaGroupLimits      = @(),
         $QuotaGroupAllocations = @(),
-        $VmInventory           = @()
+        $VmInventory           = @(),
+        $ContainerAppsQuota    = @(),
+        $ContainerAppsEnvQuota = @(),
+
+        # When $false (quota groups weren't collected), the QuotaGroupLimits
+        # and QuotaGroupAllocations sheets are omitted from the workbook
+        # entirely rather than written out empty.
+        [switch] $IncludeQuotaGroupSheets,
+
+        # When non-empty, the workbook is trimmed down to ONLY these sheet
+        # names plus the two always-present sheets (Inputs, Errors) -
+        # Summary/Quota/Restrictions/ZoneMap/QuotaGroup*/VMInventory/
+        # ContainerApps* are all omitted unless explicitly listed here.
+        # This is the mechanism behind every -Only<Service> switch: pass
+        # just that service's sheet name(s) to get a minimal, fast,
+        # purpose-built workbook. Empty (default) means "include
+        # everything", subject to the other per-sheet switches above.
+        [string[]] $OnlySheets = @()
     )
 
     Assert-QRExcelModule
+
+    $onlyModeActive = $OnlySheets -and $OnlySheets.Count -gt 0
+    function Test-QRIncludeSheet {
+        param([Parameter(Mandatory)][string] $Name)
+        if (-not $onlyModeActive) { return $true }
+        return $OnlySheets -contains $Name
+    }
 
     # Wipe any previous run so ImportExcel doesn't try to merge sheets.
     if (Test-Path -LiteralPath $Path) {
@@ -50,6 +74,7 @@ function Write-QRWorkbook {
     }
 
     # --- Summary (with conditional formatting) ---
+    if (Test-QRIncludeSheet -Name 'Summary') {
     $summaryRows = if ($Summary -and $Summary.Count) { $Summary } else { @([pscustomobject]@{}) }
     $pkg = $summaryRows | Export-Excel @common -WorksheetName 'Summary' -PassThru
     $ws  = $pkg.Workbook.Worksheets['Summary']
@@ -91,18 +116,30 @@ function Write-QRWorkbook {
         }
     }
     Close-ExcelPackage $pkg
+    }
 
     # --- Remaining sheets ---
-    $rest = @(
-        @{ Name = 'Quota';                 Data = $Quota },
-        @{ Name = 'Restrictions';          Data = $Restrictions },
-        @{ Name = 'ZoneMap';               Data = $ZoneMap },
-        @{ Name = 'QuotaGroupLimits';      Data = $QuotaGroupLimits },
-        @{ Name = 'QuotaGroupAllocations'; Data = $QuotaGroupAllocations },
-        @{ Name = 'VMInventory';           Data = $VmInventory },
-        @{ Name = 'Inputs';                Data = $Inputs },
-        @{ Name = 'Errors';                Data = $Errors }
-    )
+    # QuotaGroupLimits/QuotaGroupAllocations are only included when quota
+    # groups were actually collected (-IncludeQuotaGroups / -QuotaGroupMgIds)
+    # - otherwise they're omitted entirely rather than written out empty.
+    # Every entry is also subject to -OnlySheets filtering via
+    # Test-QRIncludeSheet (Inputs/Errors are added unconditionally below -
+    # they're always present regardless of -Only<Service> mode).
+    $rest = New-Object System.Collections.Generic.List[hashtable]
+    if (Test-QRIncludeSheet -Name 'Quota')        { $rest.Add(@{ Name = 'Quota';        Data = $Quota }) }
+    if (Test-QRIncludeSheet -Name 'Restrictions') { $rest.Add(@{ Name = 'Restrictions'; Data = $Restrictions }) }
+    if (Test-QRIncludeSheet -Name 'ZoneMap')      { $rest.Add(@{ Name = 'ZoneMap';      Data = $ZoneMap }) }
+    if ($IncludeQuotaGroupSheets) {
+        if (Test-QRIncludeSheet -Name 'QuotaGroupLimits')      { $rest.Add(@{ Name = 'QuotaGroupLimits';      Data = $QuotaGroupLimits }) }
+        if (Test-QRIncludeSheet -Name 'QuotaGroupAllocations') { $rest.Add(@{ Name = 'QuotaGroupAllocations'; Data = $QuotaGroupAllocations }) }
+    }
+    if (Test-QRIncludeSheet -Name 'VMInventory')           { $rest.Add(@{ Name = 'VMInventory';           Data = $VmInventory }) }
+    if (Test-QRIncludeSheet -Name 'ContainerAppsQuota')    { $rest.Add(@{ Name = 'ContainerAppsQuota';    Data = $ContainerAppsQuota }) }
+    if (Test-QRIncludeSheet -Name 'ContainerAppsEnvQuota') { $rest.Add(@{ Name = 'ContainerAppsEnvQuota'; Data = $ContainerAppsEnvQuota }) }
+    # Inputs/Errors are always present, regardless of -OnlySheets.
+    $rest.Add(@{ Name = 'Inputs'; Data = $Inputs })
+    $rest.Add(@{ Name = 'Errors'; Data = $Errors })
+
     foreach ($sheet in $rest) {
         $rows = if ($sheet.Data -and $sheet.Data.Count) { $sheet.Data } else { @([pscustomobject]@{}) }
         $rows | Export-Excel `

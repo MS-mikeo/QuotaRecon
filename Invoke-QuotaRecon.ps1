@@ -15,8 +15,14 @@
       * Logical → physical availability-zone map
         (Microsoft.Resources/checkZonePeers)
 
-    Output is one Excel workbook with sheets:
-    Summary, Quota, Restrictions, ZoneMap, Inputs, Errors.
+    Output is one Excel workbook. Core sheets (always present): Summary,
+    Quota, Restrictions, ZoneMap, Inputs, Errors. Additional sheets appear
+    only when their opt-in switch is passed: QuotaGroupLimits /
+    QuotaGroupAllocations (-IncludeQuotaGroups / -QuotaGroupMgIds),
+    VMInventory (-IncludeVmInventory), ContainerAppsQuota /
+    ContainerAppsEnvQuota (-IncludeContainerAppsQuota). Passing
+    -OnlyContainerAppsQuota trims the workbook down to just
+    ContainerAppsQuota, ContainerAppsEnvQuota, Inputs, Errors.
 
 .PARAMETER SubscriptionsCsv
     Path to a single-column CSV of subscription GUIDs.
@@ -39,6 +45,30 @@
 .PARAMETER OutputPath
     Where the .xlsx should be written. Default: ./output/QuotaRecon-<UTCstamp>.xlsx
 
+.PARAMETER IncludeContainerAppsQuota
+    Opt-in: adds BOTH Container Apps quota sheets for every target Sub x
+    Region - ContainerAppsQuota (subscription/region-scoped quota: Managed
+    Environment Count, Session Pools, Subscription NCA100 GPUs, read via
+    the Microsoft.Quota provider under the Microsoft.App namespace) AND
+    ContainerAppsEnvQuota (per-managed-environment workload-profile core
+    quota: Consumption, General Purpose/D-series, Memory Optimized/
+    E-series, GPU - discovered via Azure Resource Graph, one call per
+    environment found). If no managed environments are found for the
+    specified subscriptions/regions, that's noted on the Errors sheet and
+    the console - no error is raised, ContainerAppsQuota is still
+    populated regardless.
+
+.PARAMETER OnlyContainerAppsQuota
+    Fast-path mode: skips everything except the Container Apps quota check
+    (implies -IncludeContainerAppsQuota; you don't need to pass both). SKUs
+    are not required and are ignored - SKU resolution, Microsoft.Compute
+    provider checks, the zone map, Group Quotas, VM Inventory, and the
+    Summary/Quota/Restrictions sheets are all skipped, AND the output
+    workbook itself is trimmed down to just four sheets: ContainerAppsQuota,
+    ContainerAppsEnvQuota, Inputs, Errors. Only Subscriptions and Regions
+    are needed. This -Only<Service> pattern (minimal, purpose-driven, fast)
+    is the template for future per-service opt-in switches.
+
 .EXAMPLE
     ./Invoke-QuotaRecon.ps1 `
         -SubscriptionsCsv ./templates/subscriptions.csv `
@@ -50,6 +80,13 @@
         -SubscriptionIds '11111111-...','22222222-...' `
         -Regions         'eastus2','westus3' `
         -Skus            'Standard_D4s_v5','E8ds v5'
+
+.EXAMPLE
+    # Container Apps quota only, minimal + fast - no SKUs needed.
+    ./Invoke-QuotaRecon.ps1 `
+        -SubscriptionsCsv ./templates/subscriptions.csv `
+        -RegionsCsv       ./templates/regions.csv `
+        -OnlyContainerAppsQuota
 
 .NOTES
     Requires: Az.Accounts + ImportExcel modules. Run Connect-AzAccount first.
@@ -97,6 +134,22 @@ param(
     # regions, with quota + restrictions.'
     [switch]   $IncludeAllSKUs,
 
+    # Opt-in: adds BOTH Container Apps quota sheets - ContainerAppsQuota
+    # (subscription/region-scoped quota via the Microsoft.Quota provider
+    # under the Microsoft.App namespace) and ContainerAppsEnvQuota
+    # (per-managed-environment workload-profile core quota, discovered via
+    # Azure Resource Graph). Same auth, no new module/CLI dependency.
+    [switch]   $IncludeContainerAppsQuota,
+
+    # Fast-path mode: skips everything except the Container Apps quota
+    # check (implies -IncludeContainerAppsQuota). SKUs aren't required;
+    # Microsoft.Compute checks, the zone map, Group Quotas, VM Inventory,
+    # and Summary/Quota/Restrictions are all skipped - AND the output
+    # workbook is trimmed to just ContainerAppsQuota, ContainerAppsEnvQuota,
+    # Inputs, Errors. Template pattern for future -Only<Service> switches:
+    # minimal, purpose-driven, fast.
+    [switch]   $OnlyContainerAppsQuota,
+
     # Prints the QuotaRecon version and exits. Handy for support tickets.
     [switch]   $Version
 )
@@ -106,7 +159,7 @@ $ErrorActionPreference = 'Stop'
 # ---------- Version ----------------------------------------------------
 # Bump on every behavioural change. Printed at the top of every run and
 # shown by -Version. SemVer: MAJOR.MINOR.PATCH.
-$script:QRVersion = '1.2.0'
+$script:QRVersion = '1.5.0'
 
 if ($Version) {
     Write-Host ("QuotaRecon v{0}" -f $script:QRVersion)
@@ -125,6 +178,7 @@ $here = Split-Path -Parent $PSCommandPath
 . (Join-Path $here 'src\QuotaRecon.Zones.ps1')
 . (Join-Path $here 'src\QuotaRecon.QuotaGroups.ps1')
 . (Join-Path $here 'src\QuotaRecon.Inventory.ps1')
+. (Join-Path $here 'src\QuotaRecon.ContainerApps.ps1')
 . (Join-Path $here 'src\QuotaRecon.Excel.ps1')
 
 if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
@@ -145,6 +199,10 @@ if (-not $OutputPath) {
 $outDir = Split-Path -Parent $OutputPath
 if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+}
+
+if ($OnlyContainerAppsQuota) {
+    Write-Host "[QuotaRecon] -OnlyContainerAppsQuota: skipping everything except the Container Apps quota check." -ForegroundColor DarkYellow
 }
 
 # ---------- Diagnostic log ---------------------------------------------
@@ -192,16 +250,17 @@ if ($Skus) {
     $rawSkus = Read-QRList -Inline $Skus -ColumnName 'Sku'
 } elseif ($SkusCsv) {
     $rawSkus = Read-QRList -CsvPath $SkusCsv -ColumnName 'Sku'
-} elseif (-not $IncludeAllSKUs) {
+} elseif (-not $IncludeAllSKUs -and -not $OnlyContainerAppsQuota) {
     # Skip the interactive prompt when -IncludeAllSKUs is set; the catalog
-    # itself provides the SKU list.
+    # itself provides the SKU list. Also skipped for -OnlyContainerAppsQuota,
+    # which doesn't use SKUs at all.
     $answer = Read-Host "SKUs (comma separated)"
     $rawSkus = Read-QRList -Inline @($answer) -ColumnName 'Sku'
 }
 
 if (-not $rawSubs)    { throw "No subscriptions supplied." }
 if (-not $rawRegions) { throw "No regions supplied." }
-if (-not $rawSkus -and -not $IncludeAllSKUs) { throw "No SKUs supplied. (Pass -IncludeAllSKUs to enumerate every family in the target regions.)" }
+if (-not $rawSkus -and -not $IncludeAllSKUs -and -not $OnlyContainerAppsQuota) { throw "No SKUs supplied. (Pass -IncludeAllSKUs to enumerate every family in the target regions.)" }
 
 # ---------- Normalize ---------------------------------------------------
 Write-Host "[QuotaRecon] Normalizing subscriptions/regions/SKUs..." -ForegroundColor Cyan
@@ -242,23 +301,28 @@ if ($skippedSubs.Count -gt 0) {
 # endpoints return zero rows with no error, which shows up as mysteriously
 # blank quota columns in Summary. Capture the state so the Summary loop can
 # annotate rows with a helpful Note and we can emit one Errors row per sub.
-Write-Host "[QuotaRecon] Checking Microsoft.Compute provider registration..." -ForegroundColor Cyan
+# Skipped entirely under -OnlyContainerAppsQuota - compute
+# quota isn't collected in that mode, so the check is pure overhead.
 $computeProviderState = @{}   # subId -> 'Registered' | 'NotRegistered' | 'Unknown'
-foreach ($sub in $validSubs) {
-    try {
-        $reg = Invoke-QRArm -Path "/subscriptions/$sub/providers/Microsoft.Compute`?api-version=2022-12-01"
-        $state = if ($reg.registrationState) { [string]$reg.registrationState } else { 'Unknown' }
-        $computeProviderState[$sub] = $state
-    } catch {
-        # If the check itself fails, assume Registered so we don't
-        # silently skip real data. Log a verbose note for the diagnostic log.
-        Write-Verbose "Provider check failed for $sub`: $($_.Exception.Message)"
-        $computeProviderState[$sub] = 'Unknown'
+$notRegisteredSubs = @()
+if (-not $OnlyContainerAppsQuota) {
+    Write-Host "[QuotaRecon] Checking Microsoft.Compute provider registration..." -ForegroundColor Cyan
+    foreach ($sub in $validSubs) {
+        try {
+            $reg = Invoke-QRArm -Path "/subscriptions/$sub/providers/Microsoft.Compute`?api-version=2022-12-01"
+            $state = if ($reg.registrationState) { [string]$reg.registrationState } else { 'Unknown' }
+            $computeProviderState[$sub] = $state
+        } catch {
+            # If the check itself fails, assume Registered so we don't
+            # silently skip real data. Log a verbose note for the diagnostic log.
+            Write-Verbose "Provider check failed for $sub`: $($_.Exception.Message)"
+            $computeProviderState[$sub] = 'Unknown'
+        }
     }
-}
-$notRegisteredSubs = @($validSubs | Where-Object { $computeProviderState[$_] -eq 'NotRegistered' })
-if ($notRegisteredSubs.Count -gt 0) {
-    Write-Host ("[QuotaRecon] Microsoft.Compute NotRegistered on {0} sub(s) - Summary rows will be blank with a Note." -f $notRegisteredSubs.Count) -ForegroundColor DarkYellow
+    $notRegisteredSubs = @($validSubs | Where-Object { $computeProviderState[$_] -eq 'NotRegistered' })
+    if ($notRegisteredSubs.Count -gt 0) {
+        Write-Host ("[QuotaRecon] Microsoft.Compute NotRegistered on {0} sub(s) - Summary rows will be blank with a Note." -f $notRegisteredSubs.Count) -ForegroundColor DarkYellow
+    }
 }
 
 # For region/SKU catalog probing, prefer a sub with Microsoft.Compute
@@ -280,7 +344,7 @@ if ($rawSkus -and $rawSkus.Count -gt 0) {
 # union of the target regions' resourceSkus catalogs and append them to
 # $skuRes. User-supplied families (if any) stay first in the list so they
 # win on sample-size when there's overlap (see dedup loop below).
-if ($IncludeAllSKUs) {
+if ($IncludeAllSKUs -and -not $OnlyContainerAppsQuota) {
     Write-Host "[QuotaRecon] -IncludeAllSKUs: enumerating every family from region catalogs..." -ForegroundColor Cyan
     $catalogSkuRes = Get-QRAllFamiliesFromRegions -ProbeSubscriptionId $probeSub -Regions $validRegions
     Write-Host ("[QuotaRecon]   catalog families found: {0}" -f @($catalogSkuRes).Count) -ForegroundColor DarkCyan
@@ -317,7 +381,7 @@ if ($invalidSkuRows.Count -gt 0) {
 # to family level. If the user supplied both a family and a specific size in
 # the same family, prefer the size (SampleSizeSource='user') as the sample.
 $validSkuRows = @($skuRes | Where-Object Valid)
-if (-not $validSkuRows) { throw "No valid SKUs supplied. See Inputs report." }
+if (-not $validSkuRows -and -not $OnlyContainerAppsQuota) { throw "No valid SKUs supplied. See Inputs report." }
 
 # Family -> chosen row (SampleSize + SampleSizeSource + FamilyKey + Raw).
 $familyRows = @{}
@@ -368,24 +432,28 @@ foreach ($notRegId in $notRegisteredSubs) {
 }
 
 # ---------- Zone map (first, so Summary can reference physical zones) --
-Write-Host "[QuotaRecon] Building zone map from /locations..." -ForegroundColor Cyan
+# Skipped under -OnlyContainerAppsQuota (no compute quota is collected in
+# that mode, so there's nothing for a zone map to annotate).
 $zoneMap = @()
-try {
-    $zoneMap = Get-QRZoneMapAllSubs -SubscriptionIds $validSubs -SubscriptionNames $subNames -Regions $validRegions
-}
-catch {
-    $errors.Add([pscustomobject]@{
-        Stage = 'ZoneMap'; SubscriptionId = ''; SubscriptionName = ''; Region = ''; Family = ''
-        Message = $_.Exception.Message
-    })
-}
-# subId -> region -> (logicalZone -> physicalZone)
 $zoneLookup = @{}
-foreach ($region in $validRegions) {
-    $sub2map = Get-QRPhysicalZonesForRegion -ZoneMapRows $zoneMap -Region $region
-    foreach ($k in $sub2map.Keys) {
-        if (-not $zoneLookup.ContainsKey($k)) { $zoneLookup[$k] = @{} }
-        $zoneLookup[$k][$region] = $sub2map[$k]
+if (-not $OnlyContainerAppsQuota) {
+    Write-Host "[QuotaRecon] Building zone map from /locations..." -ForegroundColor Cyan
+    try {
+        $zoneMap = Get-QRZoneMapAllSubs -SubscriptionIds $validSubs -SubscriptionNames $subNames -Regions $validRegions
+    }
+    catch {
+        $errors.Add([pscustomobject]@{
+            Stage = 'ZoneMap'; SubscriptionId = ''; SubscriptionName = ''; Region = ''; Family = ''
+            Message = $_.Exception.Message
+        })
+    }
+    # subId -> region -> (logicalZone -> physicalZone)
+    foreach ($region in $validRegions) {
+        $sub2map = Get-QRPhysicalZonesForRegion -ZoneMapRows $zoneMap -Region $region
+        foreach ($k in $sub2map.Keys) {
+            if (-not $zoneLookup.ContainsKey($k)) { $zoneLookup[$k] = @{} }
+            $zoneLookup[$k][$region] = $sub2map[$k]
+        }
     }
 }
 
@@ -401,7 +469,7 @@ $quotaGroupGroups      = @()
 $quotaGroupLimits      = @()
 $quotaGroupAllocations = @()
 $quotaGroupIndex       = @{}
-$runQuotaGroups = ($IncludeQuotaGroups -or ($QuotaGroupMgIds -and $QuotaGroupMgIds.Count -gt 0)) -and (-not $SkipQuotaGroups)
+$runQuotaGroups = ($IncludeQuotaGroups -or ($QuotaGroupMgIds -and $QuotaGroupMgIds.Count -gt 0)) -and (-not $SkipQuotaGroups) -and (-not $OnlyContainerAppsQuota)
 if ($SkipQuotaGroups -and $IncludeQuotaGroups) {
     Write-Warning "[QuotaRecon] -SkipQuotaGroups overrides -IncludeQuotaGroups; group quotas will NOT be collected."
 }
@@ -461,7 +529,7 @@ if ($runQuotaGroups) {
 # so the Summary sheet can carry a DeployedVmCount column.
 $vmInventory = @()
 $vmCountIndex = @{}
-if ($IncludeVmInventory) {
+if ($IncludeVmInventory -and -not $OnlyContainerAppsQuota) {
     Write-Host "[QuotaRecon] Collecting VM inventory via Resource Graph..." -ForegroundColor Cyan
     try {
         $familyKeys = @($familyRows.Values | ForEach-Object { $_.FamilyKey } | Where-Object { $_ } | Select-Object -Unique)
@@ -485,12 +553,92 @@ if ($IncludeVmInventory) {
     }
 }
 
-# ---------- Collect data -----------------------------------------------
-Write-Host "[QuotaRecon] Collecting quota + restrictions per (Sub x Region x Family)..." -ForegroundColor Cyan
+# ---------- Container Apps quota (opt-in) -------------------------------
+# -IncludeContainerAppsQuota collects BOTH halves of Container Apps quota
+# as a matched pair, not two separate opt-ins:
+#   * ContainerAppsQuota    - subscription/region-scoped (Microsoft.Quota
+#                             provider under the Microsoft.App namespace).
+#   * ContainerAppsEnvQuota - per-managed-environment workload-profile core
+#                             quota, found by discovering environments via
+#                             Resource Graph first, then one usages call
+#                             per environment.
+# Neither depends on SKUs/families, so this runs standalone rather than
+# inside the per-family loop below. If no managed environments are found,
+# that's noted on the Errors sheet and the console - not an error.
+$containerAppsQuota    = New-Object System.Collections.Generic.List[object]
+$containerAppsEnvQuota = New-Object System.Collections.Generic.List[object]
+if ($IncludeContainerAppsQuota -or $OnlyContainerAppsQuota) {
+    Write-Host "[QuotaRecon] Collecting Container Apps subscription/region quota..." -ForegroundColor Cyan
+    foreach ($sub in $validSubs) {
+        $subName = $subNames[$sub]
+        foreach ($region in $validRegions) {
+            try {
+                $caRows = Get-QRContainerAppsQuota -SubscriptionId $sub -SubscriptionName $subName -Region $region
+                foreach ($r in $caRows) { $containerAppsQuota.Add($r) }
+            }
+            catch {
+                $errors.Add([pscustomobject]@{
+                    Stage = 'ContainerAppsQuota'; SubscriptionId = $sub; SubscriptionName = $subName; Region = $region; Family = ''
+                    Message = $_.Exception.Message
+                })
+            }
+        }
+    }
+    Write-Host ("[QuotaRecon]   ContainerAppsQuota rows={0}" -f $containerAppsQuota.Count) -ForegroundColor DarkCyan
 
+    Write-Host "[QuotaRecon] Discovering Container Apps managed environments via Resource Graph..." -ForegroundColor Cyan
+    try {
+        $caEnvs = Get-QRContainerAppsEnvironments `
+            -SubscriptionIds   $validSubs `
+            -Regions           $validRegions `
+            -SubscriptionNames $subNames
+
+        if (@($caEnvs).Count -eq 0) {
+            Write-Host "[QuotaRecon]   no Container Apps managed environments found for the specified subscriptions/regions." -ForegroundColor DarkYellow
+            $errors.Add([pscustomobject]@{
+                Stage = 'ContainerAppsEnvQuota'; SubscriptionId = ''; SubscriptionName = ''; Region = ''; Family = ''
+                Message = 'No Container Apps managed environments were found for the specified subscriptions/regions.'
+            })
+        } else {
+            Write-Host ("[QuotaRecon]   found {0} environment(s); collecting per-environment quota..." -f @($caEnvs).Count) -ForegroundColor DarkCyan
+            foreach ($env in $caEnvs) {
+                try {
+                    $envRows = Get-QRContainerAppsEnvironmentUsage `
+                        -SubscriptionId   $env.SubscriptionId `
+                        -SubscriptionName $env.SubscriptionName `
+                        -ResourceGroup    $env.ResourceGroup `
+                        -EnvironmentName  $env.EnvironmentName `
+                        -Region           $env.Region
+                    foreach ($r in $envRows) { $containerAppsEnvQuota.Add($r) }
+                }
+                catch {
+                    $errors.Add([pscustomobject]@{
+                        Stage = 'ContainerAppsEnvQuota'; SubscriptionId = $env.SubscriptionId; SubscriptionName = $env.SubscriptionName
+                        Region = $env.Region; Family = ''
+                        Message = ("Environment '{0}' (rg '{1}'): {2}" -f $env.EnvironmentName, $env.ResourceGroup, $_.Exception.Message)
+                    })
+                }
+            }
+        }
+    }
+    catch {
+        $errors.Add([pscustomobject]@{
+            Stage = 'ContainerAppsEnvQuota'; SubscriptionId = ''; SubscriptionName = ''; Region = ''; Family = ''
+            Message = $_.Exception.Message
+        })
+    }
+}
+
+# ---------- Collect data -----------------------------------------------
+# Skipped entirely under -OnlyContainerAppsQuota: no SKUs were resolved in
+# that mode (so $familyRows is empty anyway), but we also skip the
+# Microsoft.Compute /usages pull up front to avoid the wasted ARM calls.
 $summary      = New-Object System.Collections.Generic.List[object]
 $quotaRows    = New-Object System.Collections.Generic.List[object]
 $restrictions = New-Object System.Collections.Generic.List[object]
+
+if (-not $OnlyContainerAppsQuota) {
+Write-Host "[QuotaRecon] Collecting quota + restrictions per (Sub x Region x Family)..." -ForegroundColor Cyan
 
 foreach ($sub in $validSubs) {
     $subName = $subNames[$sub]
@@ -727,9 +875,11 @@ foreach ($sub in $validSubs) {
         }
     }
 }
+}
 
 # ---------- Write workbook ---------------------------------------------
 Write-Host "[QuotaRecon] Writing $OutputPath ..." -ForegroundColor Cyan
+$caOnlySheets = if ($OnlyContainerAppsQuota) { @('ContainerAppsQuota', 'ContainerAppsEnvQuota') } else { @() }
 Write-QRWorkbook `
     -Path                  $OutputPath `
     -Summary               $summary `
@@ -739,28 +889,40 @@ Write-QRWorkbook `
     -QuotaGroupLimits      $quotaGroupLimits `
     -QuotaGroupAllocations $quotaGroupAllocations `
     -VmInventory           $vmInventory `
+    -ContainerAppsQuota    $containerAppsQuota `
+    -ContainerAppsEnvQuota $containerAppsEnvQuota `
     -Inputs                $allInputs `
-    -Errors                $errors
+    -Errors                $errors `
+    -IncludeQuotaGroupSheets:$runQuotaGroups `
+    -OnlySheets            $caOnlySheets
 
 Write-Host ""
 Write-Host "[QuotaRecon] Done." -ForegroundColor Green
 Write-Host ("  Subscriptions      : {0} valid / {1} supplied" -f $validSubs.Count,    $rawSubs.Count)
 Write-Host ("  Regions            : {0} valid / {1} supplied" -f $validRegions.Count, $rawRegions.Count)
-if ($IncludeAllSKUs) {
-    Write-Host ("  Families           : {0} valid ({1} user-supplied + catalog-enumerated)" -f $familyRows.Count, @($rawSkus).Count)
+if ($OnlyContainerAppsQuota) {
+    Write-Host ("  Mode               : -OnlyContainerAppsQuota (everything else skipped)") -ForegroundColor DarkGray
 } else {
-    Write-Host ("  Families           : {0} valid / {1} supplied" -f $familyRows.Count,   $rawSkus.Count)
+    if ($IncludeAllSKUs) {
+        Write-Host ("  Families           : {0} valid ({1} user-supplied + catalog-enumerated)" -f $familyRows.Count, @($rawSkus).Count)
+    } else {
+        Write-Host ("  Families           : {0} valid / {1} supplied" -f $familyRows.Count,   $rawSkus.Count)
+    }
+    Write-Host ("  Summary rows       : {0}" -f $summary.Count)
+    if ($runQuotaGroups) {
+        Write-Host ("  Quota groups       : {0}" -f $quotaGroupGroups.Count)
+        Write-Host ("  Group limit rows   : {0}" -f $quotaGroupLimits.Count)
+        Write-Host ("  Group alloc rows   : {0}" -f $quotaGroupAllocations.Count)
+    } else {
+        Write-Host ("  Quota groups       : skipped (pass -IncludeQuotaGroups to collect)") -ForegroundColor DarkGray
+    }
+    if ($IncludeVmInventory) {
+        Write-Host ("  VM inventory rows  : {0}" -f @($vmInventory).Count)
+    }
 }
-Write-Host ("  Summary rows       : {0}" -f $summary.Count)
-if ($runQuotaGroups) {
-    Write-Host ("  Quota groups       : {0}" -f $quotaGroupGroups.Count)
-    Write-Host ("  Group limit rows   : {0}" -f $quotaGroupLimits.Count)
-    Write-Host ("  Group alloc rows   : {0}" -f $quotaGroupAllocations.Count)
-} else {
-    Write-Host ("  Quota groups       : skipped (pass -IncludeQuotaGroups to collect)") -ForegroundColor DarkGray
-}
-if ($IncludeVmInventory) {
-    Write-Host ("  VM inventory rows  : {0}" -f @($vmInventory).Count)
+if ($IncludeContainerAppsQuota -or $OnlyContainerAppsQuota) {
+    Write-Host ("  Container Apps rows: {0}" -f $containerAppsQuota.Count)
+    Write-Host ("  Container Apps env quota rows: {0}" -f $containerAppsEnvQuota.Count)
 }
 Write-Host ("  Errors             : {0}" -f $errors.Count)
 Write-Host ("  Output             : {0}" -f $OutputPath)
