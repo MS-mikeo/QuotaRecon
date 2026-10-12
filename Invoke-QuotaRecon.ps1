@@ -20,9 +20,11 @@
     only when their opt-in switch is passed: QuotaGroupLimits /
     QuotaGroupAllocations (-IncludeQuotaGroups / -QuotaGroupMgIds),
     VMInventory (-IncludeVmInventory), ContainerAppsQuota /
-    ContainerAppsEnvQuota (-IncludeContainerAppsQuota). Passing
-    -OnlyContainerAppsQuota trims the workbook down to just
-    ContainerAppsQuota, ContainerAppsEnvQuota, Inputs, Errors.
+    ContainerAppsEnvQuota (-IncludeContainerAppsQuota),
+    CognitiveServicesQuota (-IncludeCognitiveServicesQuota). Passing any
+    -Only<Service> switch (-OnlyContainerAppsQuota /
+    -OnlyCognitiveServicesQuota) trims the workbook down to just that
+    service's sheet(s) plus Inputs and Errors.
 
 .PARAMETER SubscriptionsCsv
     Path to a single-column CSV of subscription GUIDs.
@@ -69,6 +71,21 @@
     are needed. This -Only<Service> pattern (minimal, purpose-driven, fast)
     is the template for future per-service opt-in switches.
 
+.PARAMETER IncludeCognitiveServicesQuota
+    Opt-in: adds a CognitiveServicesQuota sheet with Azure Cognitive
+    Services / Azure OpenAI / AI Foundry quota for every target Sub x
+    Region - account limits plus every per-model-family TPM/RPM/deployment
+    quota item (e.g. OpenAI.ProvisionedManaged,
+    OpenAI.GlobalProvisionedManaged, OpenAI.FineTuned.Deployments). Read
+    via the native Microsoft.CognitiveServices/locations/{region}/usages
+    endpoint - no new module or CLI dependency.
+
+.PARAMETER OnlyCognitiveServicesQuota
+    Fast-path mode: skips everything except the Cognitive Services quota
+    check (implies -IncludeCognitiveServicesQuota; you don't need to pass
+    both). Same skip list as -OnlyContainerAppsQuota, and trims the output
+    workbook down to just CognitiveServicesQuota, Inputs, Errors.
+
 .EXAMPLE
     ./Invoke-QuotaRecon.ps1 `
         -SubscriptionsCsv ./templates/subscriptions.csv `
@@ -87,6 +104,13 @@
         -SubscriptionsCsv ./templates/subscriptions.csv `
         -RegionsCsv       ./templates/regions.csv `
         -OnlyContainerAppsQuota
+
+.EXAMPLE
+    # Azure OpenAI / Cognitive Services quota only, minimal + fast.
+    ./Invoke-QuotaRecon.ps1 `
+        -SubscriptionsCsv ./templates/subscriptions.csv `
+        -RegionsCsv       ./templates/regions.csv `
+        -OnlyCognitiveServicesQuota
 
 .NOTES
     Requires: Az.Accounts + ImportExcel modules. Run Connect-AzAccount first.
@@ -150,6 +174,18 @@ param(
     # minimal, purpose-driven, fast.
     [switch]   $OnlyContainerAppsQuota,
 
+    # Opt-in: adds a CognitiveServicesQuota sheet with Azure Cognitive
+    # Services / Azure OpenAI / AI Foundry quota, read via the native
+    # Microsoft.CognitiveServices/locations/{region}/usages endpoint - same
+    # row shape as Microsoft.Compute/usages, no new module/CLI dependency.
+    [switch]   $IncludeCognitiveServicesQuota,
+
+    # Fast-path mode: skips everything except the Cognitive Services quota
+    # check (implies -IncludeCognitiveServicesQuota). Same skip list as
+    # -OnlyContainerAppsQuota; trims the workbook to CognitiveServicesQuota,
+    # Inputs, Errors.
+    [switch]   $OnlyCognitiveServicesQuota,
+
     # Prints the QuotaRecon version and exits. Handy for support tickets.
     [switch]   $Version
 )
@@ -159,7 +195,7 @@ $ErrorActionPreference = 'Stop'
 # ---------- Version ----------------------------------------------------
 # Bump on every behavioural change. Printed at the top of every run and
 # shown by -Version. SemVer: MAJOR.MINOR.PATCH.
-$script:QRVersion = '1.5.0'
+$script:QRVersion = '1.6.0'
 
 if ($Version) {
     Write-Host ("QuotaRecon v{0}" -f $script:QRVersion)
@@ -179,6 +215,7 @@ $here = Split-Path -Parent $PSCommandPath
 . (Join-Path $here 'src\QuotaRecon.QuotaGroups.ps1')
 . (Join-Path $here 'src\QuotaRecon.Inventory.ps1')
 . (Join-Path $here 'src\QuotaRecon.ContainerApps.ps1')
+. (Join-Path $here 'src\QuotaRecon.CognitiveServices.ps1')
 . (Join-Path $here 'src\QuotaRecon.Excel.ps1')
 
 if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
@@ -201,8 +238,17 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
 
-if ($OnlyContainerAppsQuota) {
-    Write-Host "[QuotaRecon] -OnlyContainerAppsQuota: skipping everything except the Container Apps quota check." -ForegroundColor DarkYellow
+# A single generic flag drives every "skip everything unrelated" gate
+# below, regardless of which -Only<Service> switch was passed. Add new
+# -Only<Service> switches to this OR-list as they're introduced - see
+# .github/copilot-instructions.md for the full pattern.
+$anyOnlyModeActive = $OnlyContainerAppsQuota -or $OnlyCognitiveServicesQuota
+
+if ($anyOnlyModeActive) {
+    $activeOnlySwitches = New-Object System.Collections.Generic.List[string]
+    if ($OnlyContainerAppsQuota)     { $activeOnlySwitches.Add('-OnlyContainerAppsQuota') }
+    if ($OnlyCognitiveServicesQuota) { $activeOnlySwitches.Add('-OnlyCognitiveServicesQuota') }
+    Write-Host ("[QuotaRecon] {0}: skipping everything except the specified quota check(s)." -f ($activeOnlySwitches -join ', ')) -ForegroundColor DarkYellow
 }
 
 # ---------- Diagnostic log ---------------------------------------------
@@ -250,17 +296,17 @@ if ($Skus) {
     $rawSkus = Read-QRList -Inline $Skus -ColumnName 'Sku'
 } elseif ($SkusCsv) {
     $rawSkus = Read-QRList -CsvPath $SkusCsv -ColumnName 'Sku'
-} elseif (-not $IncludeAllSKUs -and -not $OnlyContainerAppsQuota) {
+} elseif (-not $IncludeAllSKUs -and -not $anyOnlyModeActive) {
     # Skip the interactive prompt when -IncludeAllSKUs is set; the catalog
-    # itself provides the SKU list. Also skipped for -OnlyContainerAppsQuota,
-    # which doesn't use SKUs at all.
+    # itself provides the SKU list. Also skipped under any -Only<Service>
+    # mode, which doesn't use SKUs at all.
     $answer = Read-Host "SKUs (comma separated)"
     $rawSkus = Read-QRList -Inline @($answer) -ColumnName 'Sku'
 }
 
 if (-not $rawSubs)    { throw "No subscriptions supplied." }
 if (-not $rawRegions) { throw "No regions supplied." }
-if (-not $rawSkus -and -not $IncludeAllSKUs -and -not $OnlyContainerAppsQuota) { throw "No SKUs supplied. (Pass -IncludeAllSKUs to enumerate every family in the target regions.)" }
+if (-not $rawSkus -and -not $IncludeAllSKUs -and -not $anyOnlyModeActive) { throw "No SKUs supplied. (Pass -IncludeAllSKUs to enumerate every family in the target regions.)" }
 
 # ---------- Normalize ---------------------------------------------------
 Write-Host "[QuotaRecon] Normalizing subscriptions/regions/SKUs..." -ForegroundColor Cyan
@@ -301,11 +347,11 @@ if ($skippedSubs.Count -gt 0) {
 # endpoints return zero rows with no error, which shows up as mysteriously
 # blank quota columns in Summary. Capture the state so the Summary loop can
 # annotate rows with a helpful Note and we can emit one Errors row per sub.
-# Skipped entirely under -OnlyContainerAppsQuota - compute
+# Skipped entirely under any -Only<Service> mode - compute
 # quota isn't collected in that mode, so the check is pure overhead.
 $computeProviderState = @{}   # subId -> 'Registered' | 'NotRegistered' | 'Unknown'
 $notRegisteredSubs = @()
-if (-not $OnlyContainerAppsQuota) {
+if (-not $anyOnlyModeActive) {
     Write-Host "[QuotaRecon] Checking Microsoft.Compute provider registration..." -ForegroundColor Cyan
     foreach ($sub in $validSubs) {
         try {
@@ -344,7 +390,7 @@ if ($rawSkus -and $rawSkus.Count -gt 0) {
 # union of the target regions' resourceSkus catalogs and append them to
 # $skuRes. User-supplied families (if any) stay first in the list so they
 # win on sample-size when there's overlap (see dedup loop below).
-if ($IncludeAllSKUs -and -not $OnlyContainerAppsQuota) {
+if ($IncludeAllSKUs -and -not $anyOnlyModeActive) {
     Write-Host "[QuotaRecon] -IncludeAllSKUs: enumerating every family from region catalogs..." -ForegroundColor Cyan
     $catalogSkuRes = Get-QRAllFamiliesFromRegions -ProbeSubscriptionId $probeSub -Regions $validRegions
     Write-Host ("[QuotaRecon]   catalog families found: {0}" -f @($catalogSkuRes).Count) -ForegroundColor DarkCyan
@@ -381,7 +427,7 @@ if ($invalidSkuRows.Count -gt 0) {
 # to family level. If the user supplied both a family and a specific size in
 # the same family, prefer the size (SampleSizeSource='user') as the sample.
 $validSkuRows = @($skuRes | Where-Object Valid)
-if (-not $validSkuRows -and -not $OnlyContainerAppsQuota) { throw "No valid SKUs supplied. See Inputs report." }
+if (-not $validSkuRows -and -not $anyOnlyModeActive) { throw "No valid SKUs supplied. See Inputs report." }
 
 # Family -> chosen row (SampleSize + SampleSizeSource + FamilyKey + Raw).
 $familyRows = @{}
@@ -432,11 +478,11 @@ foreach ($notRegId in $notRegisteredSubs) {
 }
 
 # ---------- Zone map (first, so Summary can reference physical zones) --
-# Skipped under -OnlyContainerAppsQuota (no compute quota is collected in
+# Skipped under any -Only<Service> mode (no compute quota is collected in
 # that mode, so there's nothing for a zone map to annotate).
 $zoneMap = @()
 $zoneLookup = @{}
-if (-not $OnlyContainerAppsQuota) {
+if (-not $anyOnlyModeActive) {
     Write-Host "[QuotaRecon] Building zone map from /locations..." -ForegroundColor Cyan
     try {
         $zoneMap = Get-QRZoneMapAllSubs -SubscriptionIds $validSubs -SubscriptionNames $subNames -Regions $validRegions
@@ -469,7 +515,7 @@ $quotaGroupGroups      = @()
 $quotaGroupLimits      = @()
 $quotaGroupAllocations = @()
 $quotaGroupIndex       = @{}
-$runQuotaGroups = ($IncludeQuotaGroups -or ($QuotaGroupMgIds -and $QuotaGroupMgIds.Count -gt 0)) -and (-not $SkipQuotaGroups) -and (-not $OnlyContainerAppsQuota)
+$runQuotaGroups = ($IncludeQuotaGroups -or ($QuotaGroupMgIds -and $QuotaGroupMgIds.Count -gt 0)) -and (-not $SkipQuotaGroups) -and (-not $anyOnlyModeActive)
 if ($SkipQuotaGroups -and $IncludeQuotaGroups) {
     Write-Warning "[QuotaRecon] -SkipQuotaGroups overrides -IncludeQuotaGroups; group quotas will NOT be collected."
 }
@@ -529,7 +575,7 @@ if ($runQuotaGroups) {
 # so the Summary sheet can carry a DeployedVmCount column.
 $vmInventory = @()
 $vmCountIndex = @{}
-if ($IncludeVmInventory -and -not $OnlyContainerAppsQuota) {
+if ($IncludeVmInventory -and -not $anyOnlyModeActive) {
     Write-Host "[QuotaRecon] Collecting VM inventory via Resource Graph..." -ForegroundColor Cyan
     try {
         $familyKeys = @($familyRows.Values | ForEach-Object { $_.FamilyKey } | Where-Object { $_ } | Select-Object -Unique)
@@ -629,15 +675,39 @@ if ($IncludeContainerAppsQuota -or $OnlyContainerAppsQuota) {
     }
 }
 
+# ---------- Cognitive Services quota (opt-in) ---------------------------
+# Standalone sub/region loop, same rationale as Container Apps above: this
+# doesn't depend on SKUs/families either.
+$cognitiveServicesQuota = New-Object System.Collections.Generic.List[object]
+if ($IncludeCognitiveServicesQuota -or $OnlyCognitiveServicesQuota) {
+    Write-Host "[QuotaRecon] Collecting Cognitive Services / Azure OpenAI quota..." -ForegroundColor Cyan
+    foreach ($sub in $validSubs) {
+        $subName = $subNames[$sub]
+        foreach ($region in $validRegions) {
+            try {
+                $csRows = Get-QRCognitiveServicesQuota -SubscriptionId $sub -SubscriptionName $subName -Region $region
+                foreach ($r in $csRows) { $cognitiveServicesQuota.Add($r) }
+            }
+            catch {
+                $errors.Add([pscustomobject]@{
+                    Stage = 'CognitiveServicesQuota'; SubscriptionId = $sub; SubscriptionName = $subName; Region = $region; Family = ''
+                    Message = $_.Exception.Message
+                })
+            }
+        }
+    }
+    Write-Host ("[QuotaRecon]   CognitiveServicesQuota rows={0}" -f $cognitiveServicesQuota.Count) -ForegroundColor DarkCyan
+}
+
 # ---------- Collect data -----------------------------------------------
-# Skipped entirely under -OnlyContainerAppsQuota: no SKUs were resolved in
+# Skipped entirely under any -Only<Service> mode: no SKUs were resolved in
 # that mode (so $familyRows is empty anyway), but we also skip the
 # Microsoft.Compute /usages pull up front to avoid the wasted ARM calls.
 $summary      = New-Object System.Collections.Generic.List[object]
 $quotaRows    = New-Object System.Collections.Generic.List[object]
 $restrictions = New-Object System.Collections.Generic.List[object]
 
-if (-not $OnlyContainerAppsQuota) {
+if (-not $anyOnlyModeActive) {
 Write-Host "[QuotaRecon] Collecting quota + restrictions per (Sub x Region x Family)..." -ForegroundColor Cyan
 
 foreach ($sub in $validSubs) {
@@ -879,29 +949,35 @@ foreach ($sub in $validSubs) {
 
 # ---------- Write workbook ---------------------------------------------
 Write-Host "[QuotaRecon] Writing $OutputPath ..." -ForegroundColor Cyan
-$caOnlySheets = if ($OnlyContainerAppsQuota) { @('ContainerAppsQuota', 'ContainerAppsEnvQuota') } else { @() }
+# Union of sheet names for every -Only<Service> switch that was passed.
+# Empty when none were passed, meaning "include everything" (subject to
+# the other per-sheet switches, e.g. -IncludeQuotaGroups).
+$onlySheetsList = New-Object System.Collections.Generic.List[string]
+if ($OnlyContainerAppsQuota)     { $onlySheetsList.AddRange([string[]]@('ContainerAppsQuota', 'ContainerAppsEnvQuota')) }
+if ($OnlyCognitiveServicesQuota) { $onlySheetsList.Add('CognitiveServicesQuota') }
 Write-QRWorkbook `
-    -Path                  $OutputPath `
-    -Summary               $summary `
-    -Quota                 $quotaRows `
-    -Restrictions          $restrictions `
-    -ZoneMap               $zoneMap `
-    -QuotaGroupLimits      $quotaGroupLimits `
-    -QuotaGroupAllocations $quotaGroupAllocations `
-    -VmInventory           $vmInventory `
-    -ContainerAppsQuota    $containerAppsQuota `
-    -ContainerAppsEnvQuota $containerAppsEnvQuota `
-    -Inputs                $allInputs `
-    -Errors                $errors `
+    -Path                   $OutputPath `
+    -Summary                $summary `
+    -Quota                  $quotaRows `
+    -Restrictions           $restrictions `
+    -ZoneMap                $zoneMap `
+    -QuotaGroupLimits       $quotaGroupLimits `
+    -QuotaGroupAllocations  $quotaGroupAllocations `
+    -VmInventory            $vmInventory `
+    -ContainerAppsQuota     $containerAppsQuota `
+    -ContainerAppsEnvQuota  $containerAppsEnvQuota `
+    -CognitiveServicesQuota $cognitiveServicesQuota `
+    -Inputs                 $allInputs `
+    -Errors                 $errors `
     -IncludeQuotaGroupSheets:$runQuotaGroups `
-    -OnlySheets            $caOnlySheets
+    -OnlySheets             $onlySheetsList
 
 Write-Host ""
 Write-Host "[QuotaRecon] Done." -ForegroundColor Green
 Write-Host ("  Subscriptions      : {0} valid / {1} supplied" -f $validSubs.Count,    $rawSubs.Count)
 Write-Host ("  Regions            : {0} valid / {1} supplied" -f $validRegions.Count, $rawRegions.Count)
-if ($OnlyContainerAppsQuota) {
-    Write-Host ("  Mode               : -OnlyContainerAppsQuota (everything else skipped)") -ForegroundColor DarkGray
+if ($anyOnlyModeActive) {
+    Write-Host ("  Mode               : {0} (everything else skipped)" -f ($activeOnlySwitches -join ', ')) -ForegroundColor DarkGray
 } else {
     if ($IncludeAllSKUs) {
         Write-Host ("  Families           : {0} valid ({1} user-supplied + catalog-enumerated)" -f $familyRows.Count, @($rawSkus).Count)
@@ -923,6 +999,9 @@ if ($OnlyContainerAppsQuota) {
 if ($IncludeContainerAppsQuota -or $OnlyContainerAppsQuota) {
     Write-Host ("  Container Apps rows: {0}" -f $containerAppsQuota.Count)
     Write-Host ("  Container Apps env quota rows: {0}" -f $containerAppsEnvQuota.Count)
+}
+if ($IncludeCognitiveServicesQuota -or $OnlyCognitiveServicesQuota) {
+    Write-Host ("  Cognitive Services rows: {0}" -f $cognitiveServicesQuota.Count)
 }
 Write-Host ("  Errors             : {0}" -f $errors.Count)
 Write-Host ("  Output             : {0}" -f $OutputPath)

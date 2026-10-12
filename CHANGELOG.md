@@ -13,6 +13,29 @@ available via:
 
 ---
 
+## [1.6.0] - 2026-10-12
+
+### Added
+
+- **`-IncludeCognitiveServicesQuota` / `-OnlyCognitiveServicesQuota`
+  switches** — the second service onboarded onto the `-Include<Service>` /
+  `-Only<Service>` pattern. Adds a `CognitiveServicesQuota` sheet with
+  Azure Cognitive Services / Azure OpenAI / AI Foundry quota for every
+  target Sub x Region: account limits plus every per-model-family quota
+  item (provisioned throughput units, global provisioned throughput,
+  fine-tuned deployment counts, etc). Reads the native
+  `Microsoft.CognitiveServices/locations/{region}/usages` endpoint, which
+  is the same row shape `Microsoft.Compute/usages` uses, so it reuses the
+  existing `Convert-QRUsageRow` helper directly rather than needing a
+  Microsoft.Quota merge like Container Apps. `-OnlyCognitiveServicesQuota`
+  follows the same fast-path contract: implies the Include switch, skips
+  every unrelated subsystem, and trims the workbook to
+  `CognitiveServicesQuota`, `Inputs`, `Errors`.
+- Multiple `-Only<Service>` switches can now be combined in one run (e.g.
+  `-OnlyContainerAppsQuota -OnlyCognitiveServicesQuota`) — the workbook is
+  trimmed to the union of each service's sheets, and everything unrelated
+  to any of them is still skipped.
+
 ## [1.5.0] - 2026-10-12
 
 ### Added
@@ -149,6 +172,7 @@ available via:
 - Templates under `templates/` and read-only reference catalogs under
   `references/`.
 
+[1.6.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.6.0
 [1.5.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.5.0
 [1.4.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.4.0
 [1.3.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.3.0

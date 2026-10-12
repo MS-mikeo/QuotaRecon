@@ -36,6 +36,11 @@ QuotaRecon answers the questions that come up on every capacity call:
    per-environment workload-profile core quota (Consumption, D-series,
    E-series, GPU). See `-IncludeContainerAppsQuota` /
    `-OnlyContainerAppsQuota` below.
+5. **(Opt-in) What Azure OpenAI / Cognitive Services quota do I have?**
+   Reads the native `Microsoft.CognitiveServices` usages endpoint —
+   account limits plus every per-model-family TPM/RPM/deployment quota
+   item (provisioned throughput, fine-tuned deployments, etc). See
+   `-IncludeCognitiveServicesQuota` / `-OnlyCognitiveServicesQuota` below.
 
 Output is a single `.xlsx` with one worksheet per concern plus a rolled-up
 `Summary` sheet suitable for review or handoff.
@@ -395,6 +400,52 @@ usual full sheet set, you get exactly four sheets: `ContainerAppsQuota`,
 for every `-Only<Service>` switch: minimal, purpose-driven, fast — both in
 what gets collected and in what shows up in the workbook.
 
+### Azure OpenAI / Cognitive Services quota (opt-in)
+
+Add `-IncludeCognitiveServicesQuota` to any invocation to add a
+`CognitiveServicesQuota` sheet with Azure Cognitive Services / Azure
+OpenAI / AI Foundry quota for every target Sub × Region — account limits
+plus every per-model-family quota item (provisioned throughput units,
+global provisioned throughput, fine-tuned deployment counts, and more).
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.local.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -SkusCsv          ./templates/skus.csv `
+    -IncludeCognitiveServicesQuota
+```
+
+Under the hood: unlike Container Apps, Cognitive Services exposes a
+native per-region usages endpoint —
+`Microsoft.CognitiveServices/locations/{region}/usages` — in the exact
+same row shape `Microsoft.Compute/usages` uses, so it's a single GET per
+(Sub × Region) reusing the same `Convert-QRUsageRow` helper. No
+Microsoft.Quota merge needed, no new module or CLI dependency.
+
+**Columns in the `CognitiveServicesQuota` sheet:** same shape as the
+`Quota` sheet — `SubscriptionId`, `SubscriptionName`, `Region`, `Name`
+(e.g. `OpenAI.ProvisionedManaged`), `LocalizedName`, `Unit`,
+`CurrentValue`, `Limit`, `UsagePercent`.
+
+Add `-OnlyCognitiveServicesQuota` for the fast path — same skip list as
+`-OnlyContainerAppsQuota` (no SKUs needed, Microsoft.Compute/zone
+map/Group Quotas/VM Inventory/Summary collection all skipped), trimmed
+down to just `CognitiveServicesQuota`, `Inputs`, `Errors`.
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.local.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -OnlyCognitiveServicesQuota
+```
+
+> Multiple `-Only<Service>` switches can be combined — e.g.
+> `-OnlyContainerAppsQuota -OnlyCognitiveServicesQuota` collects both
+> services and produces a workbook with the union of both sheet sets
+> (`ContainerAppsQuota`, `ContainerAppsEnvQuota`, `CognitiveServicesQuota`,
+> `Inputs`, `Errors`) while still skipping everything else.
+
 ### Reference data (regions + all VM SKUs)
 
 Under `references/` you'll find two CSVs generated from the live Azure
@@ -475,6 +526,7 @@ Standard_M128ms
 | `VMInventory`             | Deployed VM or VMSS                      | `VmName`, `VmSize`, `Family`, `Zone`, `PowerState` — only when `-IncludeVmInventory` is passed |
 | `ContainerAppsQuota`      | Sub × Region × quota item                | Container Apps subscription/region quota (env count, session pools, NCA100 GPUs) — only when `-IncludeContainerAppsQuota` or `-OnlyContainerAppsQuota` is passed |
 | `ContainerAppsEnvQuota`   | Environment × quota item                 | Per-environment Container Apps workload-profile core quota (Consumption, D-series, E-series, GPU) — only when `-IncludeContainerAppsQuota` or `-OnlyContainerAppsQuota` is passed |
+| `CognitiveServicesQuota`  | Sub × Region × quota item                 | Azure OpenAI / Cognitive Services account limits + per-model-family quota — only when `-IncludeCognitiveServicesQuota` or `-OnlyCognitiveServicesQuota` is passed |
 | `Inputs`                  | Raw input value                          | What you supplied vs what QuotaRecon normalized it to                     |
 | `Errors`                  | Failure or skip                          | Auth, 4xx, unregistered providers, unknown regions/SKUs — never fails the whole run |
 
@@ -549,6 +601,7 @@ QuotaRecon/
 │   ├── QuotaRecon.QuotaGroups.ps1    # Microsoft.Quota group quotas (opt-in)
 │   ├── QuotaRecon.Inventory.ps1      # Resource Graph helper + VM inventory (opt-in)
 │   ├── QuotaRecon.ContainerApps.ps1  # Container Apps quota, sub/region + per-env (opt-in)
+│   ├── QuotaRecon.CognitiveServices.ps1 # Azure OpenAI / Cognitive Services quota (opt-in)
 │   └── QuotaRecon.Excel.ps1          # ImportExcel writer + conditional formatting
 ├── templates/
 │   ├── subscriptions.csv             # empty template (safe to publish)

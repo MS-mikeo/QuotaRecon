@@ -25,11 +25,12 @@ function Write-QRWorkbook {
         [Parameter(Mandatory)] $ZoneMap,
         [Parameter(Mandatory)] $Inputs,
         [Parameter(Mandatory)] $Errors,
-        $QuotaGroupLimits      = @(),
-        $QuotaGroupAllocations = @(),
-        $VmInventory           = @(),
-        $ContainerAppsQuota    = @(),
-        $ContainerAppsEnvQuota = @(),
+        $QuotaGroupLimits       = @(),
+        $QuotaGroupAllocations  = @(),
+        $VmInventory            = @(),
+        $ContainerAppsQuota     = @(),
+        $ContainerAppsEnvQuota  = @(),
+        $CognitiveServicesQuota = @(),
 
         # When $false (quota groups weren't collected), the QuotaGroupLimits
         # and QuotaGroupAllocations sheets are omitted from the workbook
@@ -133,9 +134,10 @@ function Write-QRWorkbook {
         if (Test-QRIncludeSheet -Name 'QuotaGroupLimits')      { $rest.Add(@{ Name = 'QuotaGroupLimits';      Data = $QuotaGroupLimits }) }
         if (Test-QRIncludeSheet -Name 'QuotaGroupAllocations') { $rest.Add(@{ Name = 'QuotaGroupAllocations'; Data = $QuotaGroupAllocations }) }
     }
-    if (Test-QRIncludeSheet -Name 'VMInventory')           { $rest.Add(@{ Name = 'VMInventory';           Data = $VmInventory }) }
-    if (Test-QRIncludeSheet -Name 'ContainerAppsQuota')    { $rest.Add(@{ Name = 'ContainerAppsQuota';    Data = $ContainerAppsQuota }) }
-    if (Test-QRIncludeSheet -Name 'ContainerAppsEnvQuota') { $rest.Add(@{ Name = 'ContainerAppsEnvQuota'; Data = $ContainerAppsEnvQuota }) }
+    if (Test-QRIncludeSheet -Name 'VMInventory')              { $rest.Add(@{ Name = 'VMInventory';              Data = $VmInventory }) }
+    if (Test-QRIncludeSheet -Name 'ContainerAppsQuota')       { $rest.Add(@{ Name = 'ContainerAppsQuota';       Data = $ContainerAppsQuota }) }
+    if (Test-QRIncludeSheet -Name 'ContainerAppsEnvQuota')    { $rest.Add(@{ Name = 'ContainerAppsEnvQuota';    Data = $ContainerAppsEnvQuota }) }
+    if (Test-QRIncludeSheet -Name 'CognitiveServicesQuota')   { $rest.Add(@{ Name = 'CognitiveServicesQuota';   Data = $CognitiveServicesQuota }) }
     # Inputs/Errors are always present, regardless of -OnlySheets.
     $rest.Add(@{ Name = 'Inputs'; Data = $Inputs })
     $rest.Add(@{ Name = 'Errors'; Data = $Errors })
