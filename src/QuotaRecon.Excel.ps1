@@ -31,6 +31,7 @@ function Write-QRWorkbook {
         $ContainerAppsQuota     = @(),
         $ContainerAppsEnvQuota  = @(),
         $CognitiveServicesQuota = @(),
+        $AppServiceQuota        = @(),
 
         # When $false (quota groups weren't collected), the QuotaGroupLimits
         # and QuotaGroupAllocations sheets are omitted from the workbook
@@ -138,6 +139,7 @@ function Write-QRWorkbook {
     if (Test-QRIncludeSheet -Name 'ContainerAppsQuota')       { $rest.Add(@{ Name = 'ContainerAppsQuota';       Data = $ContainerAppsQuota }) }
     if (Test-QRIncludeSheet -Name 'ContainerAppsEnvQuota')    { $rest.Add(@{ Name = 'ContainerAppsEnvQuota';    Data = $ContainerAppsEnvQuota }) }
     if (Test-QRIncludeSheet -Name 'CognitiveServicesQuota')   { $rest.Add(@{ Name = 'CognitiveServicesQuota';   Data = $CognitiveServicesQuota }) }
+    if (Test-QRIncludeSheet -Name 'AppServiceQuota')          { $rest.Add(@{ Name = 'AppServiceQuota';          Data = $AppServiceQuota }) }
     # Inputs/Errors are always present, regardless of -OnlySheets.
     $rest.Add(@{ Name = 'Inputs'; Data = $Inputs })
     $rest.Add(@{ Name = 'Errors'; Data = $Errors })

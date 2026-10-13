@@ -21,9 +21,10 @@
     QuotaGroupAllocations (-IncludeQuotaGroups / -QuotaGroupMgIds),
     VMInventory (-IncludeVmInventory), ContainerAppsQuota /
     ContainerAppsEnvQuota (-IncludeContainerAppsQuota),
-    CognitiveServicesQuota (-IncludeCognitiveServicesQuota). Passing any
-    -Only<Service> switch (-OnlyContainerAppsQuota /
-    -OnlyCognitiveServicesQuota) trims the workbook down to just that
+    CognitiveServicesQuota (-IncludeCognitiveServicesQuota),
+    AppServiceQuota (-IncludeAppServiceQuota). Passing any -Only<Service>
+    switch (-OnlyContainerAppsQuota / -OnlyCognitiveServicesQuota /
+    -OnlyAppServiceQuota) trims the workbook down to just that
     service's sheet(s) plus Inputs and Errors.
 
 .PARAMETER SubscriptionsCsv
@@ -86,6 +87,20 @@
     both). Same skip list as -OnlyContainerAppsQuota, and trims the output
     workbook down to just CognitiveServicesQuota, Inputs, Errors.
 
+.PARAMETER IncludeAppServiceQuota
+    Opt-in: adds an AppServiceQuota sheet with Azure App Service quota for
+    every target Sub x Region - one row per App Service plan pricing tier
+    (F1, D1, B1, B2, B3, S1, P1v3, etc) with its instance-count limit and
+    current usage. Read via the Microsoft.Quota provider under the
+    Microsoft.Web namespace (App Service has no native
+    locations/{region}/usages endpoint) - no new module or CLI dependency.
+
+.PARAMETER OnlyAppServiceQuota
+    Fast-path mode: skips everything except the App Service quota check
+    (implies -IncludeAppServiceQuota; you don't need to pass both). Same
+    skip list as -OnlyContainerAppsQuota, and trims the output workbook
+    down to just AppServiceQuota, Inputs, Errors.
+
 .EXAMPLE
     ./Invoke-QuotaRecon.ps1 `
         -SubscriptionsCsv ./templates/subscriptions.csv `
@@ -111,6 +126,13 @@
         -SubscriptionsCsv ./templates/subscriptions.csv `
         -RegionsCsv       ./templates/regions.csv `
         -OnlyCognitiveServicesQuota
+
+.EXAMPLE
+    # App Service quota only, minimal + fast.
+    ./Invoke-QuotaRecon.ps1 `
+        -SubscriptionsCsv ./templates/subscriptions.csv `
+        -RegionsCsv       ./templates/regions.csv `
+        -OnlyAppServiceQuota
 
 .NOTES
     Requires: Az.Accounts + ImportExcel modules. Run Connect-AzAccount first.
@@ -186,6 +208,20 @@ param(
     # Inputs, Errors.
     [switch]   $OnlyCognitiveServicesQuota,
 
+    # Opt-in: adds an AppServiceQuota sheet with Azure App Service quota
+    # (one row per App Service plan pricing tier - F1/D1/B1/S1/P1v3/etc),
+    # read via the Microsoft.Quota provider under the Microsoft.Web
+    # namespace (App Service has no native locations/{region}/usages
+    # endpoint - confirmed via live probe, returns 405). No new
+    # module/CLI dependency.
+    [switch]   $IncludeAppServiceQuota,
+
+    # Fast-path mode: skips everything except the App Service quota check
+    # (implies -IncludeAppServiceQuota). Same skip list as
+    # -OnlyContainerAppsQuota; trims the workbook to AppServiceQuota,
+    # Inputs, Errors.
+    [switch]   $OnlyAppServiceQuota,
+
     # Prints the QuotaRecon version and exits. Handy for support tickets.
     [switch]   $Version
 )
@@ -195,7 +231,7 @@ $ErrorActionPreference = 'Stop'
 # ---------- Version ----------------------------------------------------
 # Bump on every behavioural change. Printed at the top of every run and
 # shown by -Version. SemVer: MAJOR.MINOR.PATCH.
-$script:QRVersion = '1.6.0'
+$script:QRVersion = '1.7.0'
 
 if ($Version) {
     Write-Host ("QuotaRecon v{0}" -f $script:QRVersion)
@@ -216,6 +252,7 @@ $here = Split-Path -Parent $PSCommandPath
 . (Join-Path $here 'src\QuotaRecon.Inventory.ps1')
 . (Join-Path $here 'src\QuotaRecon.ContainerApps.ps1')
 . (Join-Path $here 'src\QuotaRecon.CognitiveServices.ps1')
+. (Join-Path $here 'src\QuotaRecon.AppService.ps1')
 . (Join-Path $here 'src\QuotaRecon.Excel.ps1')
 
 if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
@@ -242,12 +279,13 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
 # below, regardless of which -Only<Service> switch was passed. Add new
 # -Only<Service> switches to this OR-list as they're introduced - see
 # .github/copilot-instructions.md for the full pattern.
-$anyOnlyModeActive = $OnlyContainerAppsQuota -or $OnlyCognitiveServicesQuota
+$anyOnlyModeActive = $OnlyContainerAppsQuota -or $OnlyCognitiveServicesQuota -or $OnlyAppServiceQuota
 
 if ($anyOnlyModeActive) {
     $activeOnlySwitches = New-Object System.Collections.Generic.List[string]
     if ($OnlyContainerAppsQuota)     { $activeOnlySwitches.Add('-OnlyContainerAppsQuota') }
     if ($OnlyCognitiveServicesQuota) { $activeOnlySwitches.Add('-OnlyCognitiveServicesQuota') }
+    if ($OnlyAppServiceQuota)        { $activeOnlySwitches.Add('-OnlyAppServiceQuota') }
     Write-Host ("[QuotaRecon] {0}: skipping everything except the specified quota check(s)." -f ($activeOnlySwitches -join ', ')) -ForegroundColor DarkYellow
 }
 
@@ -699,6 +737,32 @@ if ($IncludeCognitiveServicesQuota -or $OnlyCognitiveServicesQuota) {
     Write-Host ("[QuotaRecon]   CognitiveServicesQuota rows={0}" -f $cognitiveServicesQuota.Count) -ForegroundColor DarkCyan
 }
 
+# ---------- App Service quota (opt-in) -----------------------------------
+# Standalone sub/region loop, same rationale as Container Apps/Cognitive
+# Services above: this doesn't depend on SKUs/families either. Quota is
+# purely subscription/region scoped (one row per pricing tier), so unlike
+# Container Apps there's no secondary per-resource discovery step.
+$appServiceQuota = New-Object System.Collections.Generic.List[object]
+if ($IncludeAppServiceQuota -or $OnlyAppServiceQuota) {
+    Write-Host "[QuotaRecon] Collecting App Service quota..." -ForegroundColor Cyan
+    foreach ($sub in $validSubs) {
+        $subName = $subNames[$sub]
+        foreach ($region in $validRegions) {
+            try {
+                $asRows = Get-QRAppServiceQuota -SubscriptionId $sub -SubscriptionName $subName -Region $region
+                foreach ($r in $asRows) { $appServiceQuota.Add($r) }
+            }
+            catch {
+                $errors.Add([pscustomobject]@{
+                    Stage = 'AppServiceQuota'; SubscriptionId = $sub; SubscriptionName = $subName; Region = $region; Family = ''
+                    Message = $_.Exception.Message
+                })
+            }
+        }
+    }
+    Write-Host ("[QuotaRecon]   AppServiceQuota rows={0}" -f $appServiceQuota.Count) -ForegroundColor DarkCyan
+}
+
 # ---------- Collect data -----------------------------------------------
 # Skipped entirely under any -Only<Service> mode: no SKUs were resolved in
 # that mode (so $familyRows is empty anyway), but we also skip the
@@ -955,6 +1019,7 @@ Write-Host "[QuotaRecon] Writing $OutputPath ..." -ForegroundColor Cyan
 $onlySheetsList = New-Object System.Collections.Generic.List[string]
 if ($OnlyContainerAppsQuota)     { $onlySheetsList.AddRange([string[]]@('ContainerAppsQuota', 'ContainerAppsEnvQuota')) }
 if ($OnlyCognitiveServicesQuota) { $onlySheetsList.Add('CognitiveServicesQuota') }
+if ($OnlyAppServiceQuota)        { $onlySheetsList.Add('AppServiceQuota') }
 Write-QRWorkbook `
     -Path                   $OutputPath `
     -Summary                $summary `
@@ -967,6 +1032,7 @@ Write-QRWorkbook `
     -ContainerAppsQuota     $containerAppsQuota `
     -ContainerAppsEnvQuota  $containerAppsEnvQuota `
     -CognitiveServicesQuota $cognitiveServicesQuota `
+    -AppServiceQuota        $appServiceQuota `
     -Inputs                 $allInputs `
     -Errors                 $errors `
     -IncludeQuotaGroupSheets:$runQuotaGroups `
@@ -1002,6 +1068,9 @@ if ($IncludeContainerAppsQuota -or $OnlyContainerAppsQuota) {
 }
 if ($IncludeCognitiveServicesQuota -or $OnlyCognitiveServicesQuota) {
     Write-Host ("  Cognitive Services rows: {0}" -f $cognitiveServicesQuota.Count)
+}
+if ($IncludeAppServiceQuota -or $OnlyAppServiceQuota) {
+    Write-Host ("  App Service rows   : {0}" -f $appServiceQuota.Count)
 }
 Write-Host ("  Errors             : {0}" -f $errors.Count)
 Write-Host ("  Output             : {0}" -f $OutputPath)

@@ -41,6 +41,10 @@ QuotaRecon answers the questions that come up on every capacity call:
    account limits plus every per-model-family TPM/RPM/deployment quota
    item (provisioned throughput, fine-tuned deployments, etc). See
    `-IncludeCognitiveServicesQuota` / `-OnlyCognitiveServicesQuota` below.
+6. **(Opt-in) What Azure App Service quota do I have?**
+   Reads the `Microsoft.Quota` provider for subscription/region-scoped App
+   Service plan pricing-tier limits (F1, D1, B1, S1, P1v3, etc). See
+   `-IncludeAppServiceQuota` / `-OnlyAppServiceQuota` below.
 
 Output is a single `.xlsx` with one worksheet per concern plus a rolled-up
 `Summary` sheet suitable for review or handoff.
@@ -446,6 +450,47 @@ down to just `CognitiveServicesQuota`, `Inputs`, `Errors`.
 > (`ContainerAppsQuota`, `ContainerAppsEnvQuota`, `CognitiveServicesQuota`,
 > `Inputs`, `Errors`) while still skipping everything else.
 
+### Azure App Service quota (opt-in)
+
+Add `-IncludeAppServiceQuota` to any invocation to add an
+`AppServiceQuota` sheet with Azure App Service quota for every target
+Sub × Region — one row per App Service plan pricing tier (F1, D1, B1, B2,
+B3, S1, S2, S3, P1v3, etc) with its instance-count limit and current
+usage.
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.local.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -SkusCsv          ./templates/skus.csv `
+    -IncludeAppServiceQuota
+```
+
+Under the hood: like Container Apps, App Service has no native per-region
+usages endpoint (`Microsoft.Web/locations/{region}/usages` returns `405
+Method Not Allowed` — confirmed live). Quota is read from the generic
+**Microsoft.Quota** resource provider, scoped under the `Microsoft.Web`
+namespace — two paged `GET`s per (Sub × Region), merged by quota name.
+Unlike Container Apps, App Service quota is purely subscription/region
+scoped (no per-resource discovery step needed), making this the simplest
+service onboarded so far — one sheet, one standalone collection loop.
+
+**Columns in the `AppServiceQuota` sheet:** same shape as the
+`ContainerAppsQuota` sheet — `SubscriptionId`, `SubscriptionName`,
+`Region`, `Name` (e.g. `S1`, `P1v3`), `LocalizedName`, `Unit`,
+`CurrentValue`, `Limit`, `UsagePercent`.
+
+Add `-OnlyAppServiceQuota` for the fast path — same skip list as the other
+`-Only<Service>` switches, trimmed down to just `AppServiceQuota`,
+`Inputs`, `Errors`.
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.local.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -OnlyAppServiceQuota
+```
+
 ### Reference data (regions + all VM SKUs)
 
 Under `references/` you'll find two CSVs generated from the live Azure
@@ -527,6 +572,7 @@ Standard_M128ms
 | `ContainerAppsQuota`      | Sub × Region × quota item                | Container Apps subscription/region quota (env count, session pools, NCA100 GPUs) — only when `-IncludeContainerAppsQuota` or `-OnlyContainerAppsQuota` is passed |
 | `ContainerAppsEnvQuota`   | Environment × quota item                 | Per-environment Container Apps workload-profile core quota (Consumption, D-series, E-series, GPU) — only when `-IncludeContainerAppsQuota` or `-OnlyContainerAppsQuota` is passed |
 | `CognitiveServicesQuota`  | Sub × Region × quota item                 | Azure OpenAI / Cognitive Services account limits + per-model-family quota — only when `-IncludeCognitiveServicesQuota` or `-OnlyCognitiveServicesQuota` is passed |
+| `AppServiceQuota`         | Sub × Region × quota item                 | App Service plan pricing-tier instance limits (F1, D1, B1, S1, P1v3, etc) — only when `-IncludeAppServiceQuota` or `-OnlyAppServiceQuota` is passed |
 | `Inputs`                  | Raw input value                          | What you supplied vs what QuotaRecon normalized it to                     |
 | `Errors`                  | Failure or skip                          | Auth, 4xx, unregistered providers, unknown regions/SKUs — never fails the whole run |
 
@@ -602,6 +648,7 @@ QuotaRecon/
 │   ├── QuotaRecon.Inventory.ps1      # Resource Graph helper + VM inventory (opt-in)
 │   ├── QuotaRecon.ContainerApps.ps1  # Container Apps quota, sub/region + per-env (opt-in)
 │   ├── QuotaRecon.CognitiveServices.ps1 # Azure OpenAI / Cognitive Services quota (opt-in)
+│   ├── QuotaRecon.AppService.ps1     # App Service plan pricing-tier quota (opt-in)
 │   └── QuotaRecon.Excel.ps1          # ImportExcel writer + conditional formatting
 ├── templates/
 │   ├── subscriptions.csv             # empty template (safe to publish)

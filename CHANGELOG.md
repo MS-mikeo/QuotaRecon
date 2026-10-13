@@ -13,6 +13,28 @@ available via:
 
 ---
 
+## [1.7.0] - 2026-10-13
+
+### Added
+
+- **`-IncludeAppServiceQuota` / `-OnlyAppServiceQuota` switches** — the
+  third service onboarded onto the `-Include<Service>` / `-Only<Service>`
+  pattern. Adds an `AppServiceQuota` sheet with Azure App Service quota
+  for every target Sub x Region: one row per App Service plan pricing
+  tier (F1, D1, B1, B2, B3, S1, S2, S3, P1v3, etc) with its
+  instance-count limit and current usage. Like Container Apps, App
+  Service has no native per-region usages endpoint (confirmed live:
+  `Microsoft.Web/locations/{region}/usages` returns `405 Method Not
+  Allowed`), so quota is read from the generic Microsoft.Quota provider
+  under the Microsoft.Web namespace. Unlike Container Apps, App Service
+  quota is purely subscription/region scoped with no per-resource
+  discovery step, making it the simplest service onboarded so far.
+  `-OnlyAppServiceQuota` follows the same fast-path contract as the other
+  `-Only<Service>` switches.
+- The `$anyOnlyModeActive` / `-OnlySheets` generalization introduced in
+  1.5.0/1.6.0 now covers three services with zero per-switch duplication
+  in the skip-gates — confirms the pattern scales cleanly.
+
 ## [1.6.0] - 2026-10-12
 
 ### Added
@@ -172,6 +194,7 @@ available via:
 - Templates under `templates/` and read-only reference catalogs under
   `references/`.
 
+[1.7.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.7.0
 [1.6.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.6.0
 [1.5.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.5.0
 [1.4.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.4.0
