@@ -38,6 +38,20 @@ function Write-QRWorkbook {
         # entirely rather than written out empty.
         [switch] $IncludeQuotaGroupSheets,
 
+        # Each of these gates its matching sheet(s) the same way
+        # -IncludeQuotaGroupSheets does: when $false, the sheet is omitted
+        # entirely (not written out empty). The caller passes the actual
+        # "was this service requested" value (the -Include<Service> switch
+        # OR'd with its -Only<Service> counterpart) - without this,
+        # Test-QRIncludeSheet alone can't tell "service wasn't requested"
+        # apart from "no -OnlySheets restriction active", so every opt-in
+        # sheet showed up empty on every run regardless of which switches
+        # were actually passed (fixed in 1.7.1).
+        [switch] $IncludeVmInventorySheet,
+        [switch] $IncludeContainerAppsSheets,
+        [switch] $IncludeCognitiveServicesSheet,
+        [switch] $IncludeAppServiceSheet,
+
         # When non-empty, the workbook is trimmed down to ONLY these sheet
         # names plus the two always-present sheets (Inputs, Errors) -
         # Summary/Quota/Restrictions/ZoneMap/QuotaGroup*/VMInventory/
@@ -121,12 +135,14 @@ function Write-QRWorkbook {
     }
 
     # --- Remaining sheets ---
-    # QuotaGroupLimits/QuotaGroupAllocations are only included when quota
-    # groups were actually collected (-IncludeQuotaGroups / -QuotaGroupMgIds)
-    # - otherwise they're omitted entirely rather than written out empty.
-    # Every entry is also subject to -OnlySheets filtering via
-    # Test-QRIncludeSheet (Inputs/Errors are added unconditionally below -
-    # they're always present regardless of -Only<Service> mode).
+    # QuotaGroupLimits/QuotaGroupAllocations/VMInventory/ContainerApps*/
+    # CognitiveServicesQuota/AppServiceQuota are only included when their
+    # corresponding service was actually requested (an -Include<Service>
+    # or -Only<Service> switch was passed) - otherwise they're omitted
+    # entirely rather than written out empty. Every entry is also subject
+    # to -OnlySheets filtering via Test-QRIncludeSheet (Inputs/Errors are
+    # added unconditionally below - they're always present regardless of
+    # -Only<Service> mode).
     $rest = New-Object System.Collections.Generic.List[hashtable]
     if (Test-QRIncludeSheet -Name 'Quota')        { $rest.Add(@{ Name = 'Quota';        Data = $Quota }) }
     if (Test-QRIncludeSheet -Name 'Restrictions') { $rest.Add(@{ Name = 'Restrictions'; Data = $Restrictions }) }
@@ -135,11 +151,19 @@ function Write-QRWorkbook {
         if (Test-QRIncludeSheet -Name 'QuotaGroupLimits')      { $rest.Add(@{ Name = 'QuotaGroupLimits';      Data = $QuotaGroupLimits }) }
         if (Test-QRIncludeSheet -Name 'QuotaGroupAllocations') { $rest.Add(@{ Name = 'QuotaGroupAllocations'; Data = $QuotaGroupAllocations }) }
     }
-    if (Test-QRIncludeSheet -Name 'VMInventory')              { $rest.Add(@{ Name = 'VMInventory';              Data = $VmInventory }) }
-    if (Test-QRIncludeSheet -Name 'ContainerAppsQuota')       { $rest.Add(@{ Name = 'ContainerAppsQuota';       Data = $ContainerAppsQuota }) }
-    if (Test-QRIncludeSheet -Name 'ContainerAppsEnvQuota')    { $rest.Add(@{ Name = 'ContainerAppsEnvQuota';    Data = $ContainerAppsEnvQuota }) }
-    if (Test-QRIncludeSheet -Name 'CognitiveServicesQuota')   { $rest.Add(@{ Name = 'CognitiveServicesQuota';   Data = $CognitiveServicesQuota }) }
-    if (Test-QRIncludeSheet -Name 'AppServiceQuota')          { $rest.Add(@{ Name = 'AppServiceQuota';          Data = $AppServiceQuota }) }
+    if ($IncludeVmInventorySheet -and (Test-QRIncludeSheet -Name 'VMInventory')) {
+        $rest.Add(@{ Name = 'VMInventory'; Data = $VmInventory })
+    }
+    if ($IncludeContainerAppsSheets) {
+        if (Test-QRIncludeSheet -Name 'ContainerAppsQuota')    { $rest.Add(@{ Name = 'ContainerAppsQuota';    Data = $ContainerAppsQuota }) }
+        if (Test-QRIncludeSheet -Name 'ContainerAppsEnvQuota') { $rest.Add(@{ Name = 'ContainerAppsEnvQuota'; Data = $ContainerAppsEnvQuota }) }
+    }
+    if ($IncludeCognitiveServicesSheet -and (Test-QRIncludeSheet -Name 'CognitiveServicesQuota')) {
+        $rest.Add(@{ Name = 'CognitiveServicesQuota'; Data = $CognitiveServicesQuota })
+    }
+    if ($IncludeAppServiceSheet -and (Test-QRIncludeSheet -Name 'AppServiceQuota')) {
+        $rest.Add(@{ Name = 'AppServiceQuota'; Data = $AppServiceQuota })
+    }
     # Inputs/Errors are always present, regardless of -OnlySheets.
     $rest.Add(@{ Name = 'Inputs'; Data = $Inputs })
     $rest.Add(@{ Name = 'Errors'; Data = $Errors })

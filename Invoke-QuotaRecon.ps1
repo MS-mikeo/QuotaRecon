@@ -231,7 +231,7 @@ $ErrorActionPreference = 'Stop'
 # ---------- Version ----------------------------------------------------
 # Bump on every behavioural change. Printed at the top of every run and
 # shown by -Version. SemVer: MAJOR.MINOR.PATCH.
-$script:QRVersion = '1.7.0'
+$script:QRVersion = '1.7.1'
 
 if ($Version) {
     Write-Host ("QuotaRecon v{0}" -f $script:QRVersion)
@@ -1036,6 +1036,10 @@ Write-QRWorkbook `
     -Inputs                 $allInputs `
     -Errors                 $errors `
     -IncludeQuotaGroupSheets:$runQuotaGroups `
+    -IncludeVmInventorySheet:$IncludeVmInventory `
+    -IncludeContainerAppsSheets:($IncludeContainerAppsQuota -or $OnlyContainerAppsQuota) `
+    -IncludeCognitiveServicesSheet:($IncludeCognitiveServicesQuota -or $OnlyCognitiveServicesQuota) `
+    -IncludeAppServiceSheet:($IncludeAppServiceQuota -or $OnlyAppServiceQuota) `
     -OnlySheets             $onlySheetsList
 
 Write-Host ""

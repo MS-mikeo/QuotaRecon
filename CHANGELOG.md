@@ -13,6 +13,30 @@ available via:
 
 ---
 
+## [1.7.1] - 2026-10-15
+
+### Fixed
+
+- **Opt-in service sheets (`VMInventory`, `ContainerAppsQuota`,
+  `ContainerAppsEnvQuota`, `CognitiveServicesQuota`, `AppServiceQuota`)
+  were always being written to the workbook, even when their
+  `-Include<Service>` switch was never passed.** `Write-QRWorkbook`'s
+  `-OnlySheets` filter only restricts sheets down to an explicit allow-list
+  when a `-Only<Service>` switch is active; it never gated whether a
+  sheet should exist at all when no `-Only` switch was in play (which is
+  the common case). As a result, every run - even a plain VM-quota-only
+  run with no opt-in switches - produced a workbook with empty
+  `ContainerAppsQuota` / `ContainerAppsEnvQuota` / `CognitiveServicesQuota`
+  / `AppServiceQuota` tabs. `Write-QRWorkbook` now takes an explicit
+  `-Include<Service>Sheet` switch per opt-in sheet group (mirroring the
+  `-IncludeQuotaGroupSheets` gate that `QuotaGroupLimits` /
+  `QuotaGroupAllocations` already had correctly), and `Invoke-QuotaRecon.ps1`
+  passes the actual "was this requested" value for each
+  (`-IncludeVmInventory`, `-IncludeContainerAppsQuota` `-or`
+  `-OnlyContainerAppsQuota`, etc). Sheets now only appear when genuinely
+  requested, matching the behavior the script's own `.DESCRIPTION` already
+  documented.
+
 ## [1.7.0] - 2026-10-13
 
 ### Added
@@ -194,6 +218,7 @@ available via:
 - Templates under `templates/` and read-only reference catalogs under
   `references/`.
 
+[1.7.1]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.7.1
 [1.7.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.7.0
 [1.6.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.6.0
 [1.5.0]: https://github.com/MS-mikeo/QuotaRecon/releases/tag/v1.5.0
