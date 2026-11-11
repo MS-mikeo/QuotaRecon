@@ -2,8 +2,25 @@
 
 ![QuotaRecon](graphics/quotarecon-v2.png)
 
-**Reconnaissance for Azure compute quota, SKU restrictions, and availability-zone
-mappings across many subscriptions, regions, and SKUs — in one Excel workbook.**
+**Reconnaissance for Azure quota, SKU restrictions, service availability, and
+availability-zone mappings — Compute, Container Apps, Azure OpenAI, App Service,
+and Azure SQL — across many subscriptions and regions, in one Excel workbook.**
+
+### What it checks
+
+| Service | What you get | How to enable |
+|---|---|---|
+| **Virtual Machines (Compute)** | Regional + family vCPU quota, SKU/zone restrictions, logical → physical AZ mapping | Default |
+| **All VM families in region** | Every VM family offered in the target regions, instead of your SKU list | `-IncludeAllSKUs` |
+| **Compute Group Quotas** | Management-group quota group limits and allocations | `-IncludeQuotaGroups` |
+| **VM Inventory** | Deployed VMs/VMSS per Sub × Region × SKU family | `-IncludeVmInventory` |
+| **Azure Container Apps** | Subscription/region limits + per-environment workload-profile cores | `-IncludeContainerAppsQuota` / `-OnlyContainerAppsQuota` |
+| **Azure OpenAI / Cognitive Services** | Account limits + per-model TPM/RPM/deployment quota | `-IncludeCognitiveServicesQuota` / `-OnlyCognitiveServicesQuota` |
+| **Azure App Service** | App Service plan pricing-tier instance limits | `-IncludeAppServiceQuota` / `-OnlyAppServiceQuota` |
+| **Azure SQL (DB + Managed Instance)** | Server + vCore quota, per-tier availability, zone-redundancy support | `-IncludeSqlQuota` / `-OnlySqlQuota` |
+
+`-Include…` adds the service to a normal run; `-Only…` runs just that
+service (no SKU list needed) and can be combined with other `-Only…` switches.
 
 > **Current release:** see [CHANGELOG.md](CHANGELOG.md). Every run prints the
 > version at the top; `./Invoke-QuotaRecon.ps1 -Version` prints and exits.
