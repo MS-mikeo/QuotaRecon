@@ -45,6 +45,11 @@ QuotaRecon answers the questions that come up on every capacity call:
    Reads the `Microsoft.Quota` provider for subscription/region-scoped App
    Service plan pricing-tier limits (F1, D1, B1, S1, P1v3, etc). See
    `-IncludeAppServiceQuota` / `-OnlyAppServiceQuota` below.
+7. **(Opt-in) What Azure SQL quota do I have, and can I actually deploy
+   SQL Database / Managed Instance in these regions?**
+   Reads the native `Microsoft.Sql` usages and capabilities endpoints —
+   server and vCore quota, plus per-edition/family restriction status and
+   zone-redundancy support. See `-IncludeSqlQuota` / `-OnlySqlQuota` below.
 
 Output is a single `.xlsx` with one worksheet per concern plus a rolled-up
 `Summary` sheet suitable for review or handoff.
@@ -491,6 +496,70 @@ Add `-OnlyAppServiceQuota` for the fast path — same skip list as the other
     -OnlyAppServiceQuota
 ```
 
+### Azure SQL quota + availability (opt-in)
+
+Add `-IncludeSqlQuota` to any invocation to add three Azure SQL sheets for
+every target Sub × Region, covering both **Azure SQL Database** and
+**Azure SQL Managed Instance**:
+
+- `SqlQuota`: server count, the regional SQL DB/DW vCore quota, and the
+  Managed Instance vCore quota per hardware series (Standard, Premium,
+  Premium Memory Optimized). Free-tier / free-offer counters are left out.
+- `SqlDbCapabilities`: one row per SQL Database edition × hardware family
+  × compute model (e.g. `GeneralPurpose` / `Gen5` / `Serverless`), showing
+  whether it can actually be provisioned in that region for that
+  subscription.
+- `SqlMiCapabilities`: one row per Managed Instance edition × hardware
+  family (e.g. `BusinessCritical` / `Gen8IM`), same idea.
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.local.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -SkusCsv          ./templates/skus.csv `
+    -IncludeSqlQuota
+```
+
+Under the hood: two native calls per (Sub × Region) —
+`Microsoft.Sql/locations/{region}/usages` (quota) and
+`Microsoft.Sql/locations/{region}/capabilities` (availability).
+Microsoft.Sql is **not** onboarded to the generic Microsoft.Quota provider
+(it returns `400` — confirmed live), so there's no fallback path.
+
+**Columns in the `SqlQuota` sheet:** `SubscriptionId`, `SubscriptionName`,
+`Region`, `Scope` (`Database` / `ManagedInstance`), `Name`, `DisplayName`,
+`Unit`, `CurrentValue`, `Limit`, `UsagePercent`, `Note`. When Azure
+reports a limit of `-1` the `Limit` cell is left blank and `Note` says no
+explicit limit is set.
+
+**Columns in the capability sheets:**
+
+| Column | Meaning |
+|---|---|
+| `Edition`, `Family`, `ComputeModel` (DB) / `GeneralPurposeV2`, `Family`, `Status` (MI) | What the row describes |
+| `SizeRange` (DB) / `vCoreRange` (MI) | Smallest–largest size offered in that group |
+| `Offered` | Number of sizes Azure lists in that group |
+| `RestrictedCount` | How many of those carry a "provisioning is restricted" reason for this subscription |
+| `Restrictions` | `None` (green) = all open, `Partial` (amber) = some restricted, `Yes` (red) = all restricted |
+| `ZoneRedundantCapable` | `Yes` / `Partial` / `No` — whether zone-redundant deployments are supported |
+| `Reason` | Azure's restriction message(s), e.g. "Provisioning is restricted in this region… open a support request" |
+
+> **Read the capability sheets together with `SqlQuota`.** Capabilities
+> only say whether a size is *offered and unrestricted*; quota can still
+> block you. Example: a region can show Managed Instance `Restrictions =
+> None` while its MI vCore quota is `0 / 0`.
+
+Add `-OnlySqlQuota` for the fast path — same skip list as the other
+`-Only<Service>` switches, trimmed down to just `SqlQuota`,
+`SqlDbCapabilities`, `SqlMiCapabilities`, `Inputs`, `Errors`.
+
+```powershell
+./Invoke-QuotaRecon.ps1 `
+    -SubscriptionsCsv ./templates/subscriptions.local.csv `
+    -RegionsCsv       ./templates/regions.csv `
+    -OnlySqlQuota
+```
+
 ### Reference data (regions + all VM SKUs)
 
 Under `references/` you'll find two CSVs generated from the live Azure
@@ -573,6 +642,9 @@ Standard_M128ms
 | `ContainerAppsEnvQuota`   | Environment × quota item                 | Per-environment Container Apps workload-profile core quota (Consumption, D-series, E-series, GPU) — only when `-IncludeContainerAppsQuota` or `-OnlyContainerAppsQuota` is passed |
 | `CognitiveServicesQuota`  | Sub × Region × quota item                 | Azure OpenAI / Cognitive Services account limits + per-model-family quota — only when `-IncludeCognitiveServicesQuota` or `-OnlyCognitiveServicesQuota` is passed |
 | `AppServiceQuota`         | Sub × Region × quota item                 | App Service plan pricing-tier instance limits (F1, D1, B1, S1, P1v3, etc) — only when `-IncludeAppServiceQuota` or `-OnlyAppServiceQuota` is passed |
+| `SqlQuota`                | Sub × Region × quota item                 | Azure SQL server count, regional SQL DB/DW vCore quota, Managed Instance vCore quota per hardware series — only when `-IncludeSqlQuota` or `-OnlySqlQuota` is passed |
+| `SqlDbCapabilities`       | Sub × Region × Edition × Family × Compute model | Whether each SQL Database tier can be provisioned (None/Partial/Yes) + zone-redundancy support — only with `-IncludeSqlQuota` / `-OnlySqlQuota` |
+| `SqlMiCapabilities`       | Sub × Region × Edition × Family           | Whether each Managed Instance tier can be provisioned (None/Partial/Yes) + zone-redundancy support — only with `-IncludeSqlQuota` / `-OnlySqlQuota` |
 | `Inputs`                  | Raw input value                          | What you supplied vs what QuotaRecon normalized it to                     |
 | `Errors`                  | Failure or skip                          | Auth, 4xx, unregistered providers, unknown regions/SKUs — never fails the whole run |
 
@@ -649,6 +721,7 @@ QuotaRecon/
 │   ├── QuotaRecon.ContainerApps.ps1  # Container Apps quota, sub/region + per-env (opt-in)
 │   ├── QuotaRecon.CognitiveServices.ps1 # Azure OpenAI / Cognitive Services quota (opt-in)
 │   ├── QuotaRecon.AppService.ps1     # App Service plan pricing-tier quota (opt-in)
+│   ├── QuotaRecon.Sql.ps1            # Azure SQL DB + MI quota and capabilities (opt-in)
 │   └── QuotaRecon.Excel.ps1          # ImportExcel writer + conditional formatting
 ├── templates/
 │   ├── subscriptions.csv             # empty template (safe to publish)

@@ -13,6 +13,32 @@ available via:
 
 ---
 
+## [1.8.0] - 2026-11-11
+
+### Added
+
+- **`-IncludeSqlQuota` / `-OnlySqlQuota` switches** — the fourth service
+  onboarded onto the `-Include<Service>` / `-Only<Service>` pattern,
+  covering both Azure SQL Database and Azure SQL Managed Instance. Adds
+  three sheets:
+  - `SqlQuota` — server count, regional SQL DB/DW vCore quota, and
+    Managed Instance vCore quota per hardware series. Free-tier counters
+    are left out.
+  - `SqlDbCapabilities` — one row per SQL Database edition / hardware
+    family / compute model, showing whether it can actually be
+    provisioned in that region for that subscription (`None` / `Partial`
+    / `Yes`, colour-coded green / amber / red), whether it supports zone
+    redundancy, and Azure's restriction message.
+  - `SqlMiCapabilities` — the same for Managed Instance editions and
+    hardware families.
+- Reads the native `Microsoft.Sql` usages and capabilities endpoints
+  (Microsoft.Sql isn't available through the Microsoft.Quota provider).
+  If SQL Database or Managed Instance isn't offered in a region at all,
+  that's noted on the `Errors` sheet rather than failing the run.
+- `-OnlySqlQuota` follows the same fast-path contract as the other
+  `-Only<Service>` switches and trims the workbook to `SqlQuota`,
+  `SqlDbCapabilities`, `SqlMiCapabilities`, `Inputs`, `Errors`.
+
 ## [1.7.1] - 2026-10-15
 
 ### Fixed

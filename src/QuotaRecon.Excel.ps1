@@ -32,6 +32,9 @@ function Write-QRWorkbook {
         $ContainerAppsEnvQuota  = @(),
         $CognitiveServicesQuota = @(),
         $AppServiceQuota        = @(),
+        $SqlQuota               = @(),
+        $SqlDbCapabilities      = @(),
+        $SqlMiCapabilities      = @(),
 
         # When $false (quota groups weren't collected), the QuotaGroupLimits
         # and QuotaGroupAllocations sheets are omitted from the workbook
@@ -51,6 +54,7 @@ function Write-QRWorkbook {
         [switch] $IncludeContainerAppsSheets,
         [switch] $IncludeCognitiveServicesSheet,
         [switch] $IncludeAppServiceSheet,
+        [switch] $IncludeSqlSheets,
 
         # When non-empty, the workbook is trimmed down to ONLY these sheet
         # names plus the two always-present sheets (Inputs, Errors) -
@@ -136,7 +140,7 @@ function Write-QRWorkbook {
 
     # --- Remaining sheets ---
     # QuotaGroupLimits/QuotaGroupAllocations/VMInventory/ContainerApps*/
-    # CognitiveServicesQuota/AppServiceQuota are only included when their
+    # CognitiveServicesQuota/AppServiceQuota/Sql* are only included when their
     # corresponding service was actually requested (an -Include<Service>
     # or -Only<Service> switch was passed) - otherwise they're omitted
     # entirely rather than written out empty. Every entry is also subject
@@ -164,18 +168,40 @@ function Write-QRWorkbook {
     if ($IncludeAppServiceSheet -and (Test-QRIncludeSheet -Name 'AppServiceQuota')) {
         $rest.Add(@{ Name = 'AppServiceQuota'; Data = $AppServiceQuota })
     }
+    if ($IncludeSqlSheets) {
+        if (Test-QRIncludeSheet -Name 'SqlQuota')          { $rest.Add(@{ Name = 'SqlQuota';          Data = $SqlQuota }) }
+        if (Test-QRIncludeSheet -Name 'SqlDbCapabilities') { $rest.Add(@{ Name = 'SqlDbCapabilities'; Data = $SqlDbCapabilities; StatusColumns = @('Restrictions') }) }
+        if (Test-QRIncludeSheet -Name 'SqlMiCapabilities') { $rest.Add(@{ Name = 'SqlMiCapabilities'; Data = $SqlMiCapabilities; StatusColumns = @('Restrictions') }) }
+    }
     # Inputs/Errors are always present, regardless of -OnlySheets.
     $rest.Add(@{ Name = 'Inputs'; Data = $Inputs })
     $rest.Add(@{ Name = 'Errors'; Data = $Errors })
 
     foreach ($sheet in $rest) {
         $rows = if ($sheet.Data -and $sheet.Data.Count) { $sheet.Data } else { @([pscustomobject]@{}) }
-        $rows | Export-Excel `
+        $pkg = $rows | Export-Excel `
             -Path         $Path `
             -WorksheetName $sheet.Name `
             -AutoSize `
             -FreezeTopRow `
             -AutoFilter `
-            -BoldTopRow
+            -BoldTopRow `
+            -PassThru
+
+        # Three-way status columns (None / Partial / Yes), e.g. the SQL
+        # capability sheets' Restrictions column. N/A stays uncoloured.
+        if ($sheet.StatusColumns -and $sheet.Data -and $sheet.Data.Count) {
+            $ws = $pkg.Workbook.Worksheets[$sheet.Name]
+            $rowCount = $sheet.Data.Count + 1
+            for ($c = 1; $c -le $ws.Dimension.Columns; $c++) {
+                if ($sheet.StatusColumns -notcontains $ws.Cells[1, $c].Text) { continue }
+                $letter = [OfficeOpenXml.ExcelCellAddress]::GetColumnLetter($c)
+                $range  = "${letter}2:${letter}$rowCount"
+                Add-ConditionalFormatting -Worksheet $ws -Address $range -RuleType Equal -ConditionValue '"None"'    -BackgroundColor LightGreen
+                Add-ConditionalFormatting -Worksheet $ws -Address $range -RuleType Equal -ConditionValue '"Partial"' -BackgroundColor Gold
+                Add-ConditionalFormatting -Worksheet $ws -Address $range -RuleType Equal -ConditionValue '"Yes"'     -BackgroundColor LightCoral
+            }
+        }
+        Close-ExcelPackage $pkg
     }
 }

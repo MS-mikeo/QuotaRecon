@@ -22,10 +22,12 @@
     VMInventory (-IncludeVmInventory), ContainerAppsQuota /
     ContainerAppsEnvQuota (-IncludeContainerAppsQuota),
     CognitiveServicesQuota (-IncludeCognitiveServicesQuota),
-    AppServiceQuota (-IncludeAppServiceQuota). Passing any -Only<Service>
-    switch (-OnlyContainerAppsQuota / -OnlyCognitiveServicesQuota /
-    -OnlyAppServiceQuota) trims the workbook down to just that
-    service's sheet(s) plus Inputs and Errors.
+    AppServiceQuota (-IncludeAppServiceQuota), SqlQuota /
+    SqlDbCapabilities / SqlMiCapabilities (-IncludeSqlQuota). Passing any
+    -Only<Service> switch (-OnlyContainerAppsQuota /
+    -OnlyCognitiveServicesQuota / -OnlyAppServiceQuota / -OnlySqlQuota)
+    trims the workbook down to just that service's sheet(s) plus Inputs
+    and Errors.
 
 .PARAMETER SubscriptionsCsv
     Path to a single-column CSV of subscription GUIDs.
@@ -101,6 +103,23 @@
     skip list as -OnlyContainerAppsQuota, and trims the output workbook
     down to just AppServiceQuota, Inputs, Errors.
 
+.PARAMETER IncludeSqlQuota
+    Opt-in: adds three Azure SQL sheets for every target Sub x Region -
+    SqlQuota (server count, regional SQL DB/DW vCore quota, and Managed
+    Instance vCore quota per hardware series, from the native
+    Microsoft.Sql/locations/{region}/usages endpoint; free-tier counters
+    are omitted), SqlDbCapabilities and SqlMiCapabilities (whether each
+    SQL Database edition/family/compute model and each Managed Instance
+    edition/family can actually be provisioned in that region for that
+    subscription, with None/Partial/Yes restriction status and zone-
+    redundancy support, from Microsoft.Sql/locations/{region}/capabilities).
+
+.PARAMETER OnlySqlQuota
+    Fast-path mode: skips everything except the Azure SQL checks (implies
+    -IncludeSqlQuota; you don't need to pass both). Same skip list as
+    -OnlyContainerAppsQuota, and trims the output workbook down to just
+    SqlQuota, SqlDbCapabilities, SqlMiCapabilities, Inputs, Errors.
+
 .EXAMPLE
     ./Invoke-QuotaRecon.ps1 `
         -SubscriptionsCsv ./templates/subscriptions.csv `
@@ -133,6 +152,13 @@
         -SubscriptionsCsv ./templates/subscriptions.csv `
         -RegionsCsv       ./templates/regions.csv `
         -OnlyAppServiceQuota
+
+.EXAMPLE
+    # Azure SQL Database + Managed Instance quota and availability only.
+    ./Invoke-QuotaRecon.ps1 `
+        -SubscriptionsCsv ./templates/subscriptions.csv `
+        -RegionsCsv       ./templates/regions.csv `
+        -OnlySqlQuota
 
 .NOTES
     Requires: Az.Accounts + ImportExcel modules. Run Connect-AzAccount first.
@@ -222,6 +248,20 @@ param(
     # Inputs, Errors.
     [switch]   $OnlyAppServiceQuota,
 
+    # Opt-in: adds SqlQuota, SqlDbCapabilities and SqlMiCapabilities sheets
+    # (Azure SQL Database + Managed Instance quota and per-region
+    # provisioning restrictions), read via the native
+    # Microsoft.Sql/locations/{region}/usages and /capabilities endpoints
+    # (Microsoft.Sql isn't onboarded to Microsoft.Quota - confirmed via
+    # live probe, returns 400). No new module/CLI dependency.
+    [switch]   $IncludeSqlQuota,
+
+    # Fast-path mode: skips everything except the Azure SQL checks
+    # (implies -IncludeSqlQuota). Same skip list as -OnlyContainerAppsQuota;
+    # trims the workbook to SqlQuota, SqlDbCapabilities, SqlMiCapabilities,
+    # Inputs, Errors.
+    [switch]   $OnlySqlQuota,
+
     # Prints the QuotaRecon version and exits. Handy for support tickets.
     [switch]   $Version
 )
@@ -231,7 +271,7 @@ $ErrorActionPreference = 'Stop'
 # ---------- Version ----------------------------------------------------
 # Bump on every behavioural change. Printed at the top of every run and
 # shown by -Version. SemVer: MAJOR.MINOR.PATCH.
-$script:QRVersion = '1.7.1'
+$script:QRVersion = '1.8.0'
 
 if ($Version) {
     Write-Host ("QuotaRecon v{0}" -f $script:QRVersion)
@@ -253,6 +293,7 @@ $here = Split-Path -Parent $PSCommandPath
 . (Join-Path $here 'src\QuotaRecon.ContainerApps.ps1')
 . (Join-Path $here 'src\QuotaRecon.CognitiveServices.ps1')
 . (Join-Path $here 'src\QuotaRecon.AppService.ps1')
+. (Join-Path $here 'src\QuotaRecon.Sql.ps1')
 . (Join-Path $here 'src\QuotaRecon.Excel.ps1')
 
 if (-not (Get-Module -ListAvailable -Name Az.Accounts)) {
@@ -279,13 +320,14 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
 # below, regardless of which -Only<Service> switch was passed. Add new
 # -Only<Service> switches to this OR-list as they're introduced - see
 # .github/copilot-instructions.md for the full pattern.
-$anyOnlyModeActive = $OnlyContainerAppsQuota -or $OnlyCognitiveServicesQuota -or $OnlyAppServiceQuota
+$anyOnlyModeActive = $OnlyContainerAppsQuota -or $OnlyCognitiveServicesQuota -or $OnlyAppServiceQuota -or $OnlySqlQuota
 
 if ($anyOnlyModeActive) {
     $activeOnlySwitches = New-Object System.Collections.Generic.List[string]
     if ($OnlyContainerAppsQuota)     { $activeOnlySwitches.Add('-OnlyContainerAppsQuota') }
     if ($OnlyCognitiveServicesQuota) { $activeOnlySwitches.Add('-OnlyCognitiveServicesQuota') }
     if ($OnlyAppServiceQuota)        { $activeOnlySwitches.Add('-OnlyAppServiceQuota') }
+    if ($OnlySqlQuota)               { $activeOnlySwitches.Add('-OnlySqlQuota') }
     Write-Host ("[QuotaRecon] {0}: skipping everything except the specified quota check(s)." -f ($activeOnlySwitches -join ', ')) -ForegroundColor DarkYellow
 }
 
@@ -763,6 +805,53 @@ if ($IncludeAppServiceQuota -or $OnlyAppServiceQuota) {
     Write-Host ("[QuotaRecon]   AppServiceQuota rows={0}" -f $appServiceQuota.Count) -ForegroundColor DarkCyan
 }
 
+# ---------- Azure SQL quota + capabilities (opt-in) ----------------------
+# Standalone sub/region loop - no SKU/family dependency. Quota and
+# capabilities are fetched independently so a failure in one still lets
+# the other populate.
+$sqlQuota          = New-Object System.Collections.Generic.List[object]
+$sqlDbCapabilities = New-Object System.Collections.Generic.List[object]
+$sqlMiCapabilities = New-Object System.Collections.Generic.List[object]
+if ($IncludeSqlQuota -or $OnlySqlQuota) {
+    Write-Host "[QuotaRecon] Collecting Azure SQL quota + capabilities..." -ForegroundColor Cyan
+    foreach ($sub in $validSubs) {
+        $subName = $subNames[$sub]
+        foreach ($region in $validRegions) {
+            try {
+                foreach ($r in (Get-QRSqlQuota -SubscriptionId $sub -SubscriptionName $subName -Region $region)) { $sqlQuota.Add($r) }
+            }
+            catch {
+                $errors.Add([pscustomobject]@{
+                    Stage = 'SqlQuota'; SubscriptionId = $sub; SubscriptionName = $subName; Region = $region; Family = ''
+                    Message = $_.Exception.Message
+                })
+            }
+            try {
+                $dbRows = Get-QRSqlDbCapabilityRows -SubscriptionId $sub -SubscriptionName $subName -Region $region
+                $miRows = Get-QRSqlMiCapabilityRows -SubscriptionId $sub -SubscriptionName $subName -Region $region
+                foreach ($r in $dbRows) { $sqlDbCapabilities.Add($r) }
+                foreach ($r in $miRows) { $sqlMiCapabilities.Add($r) }
+                foreach ($pair in @(@('SQL Database', $dbRows.Count), @('SQL Managed Instance', $miRows.Count))) {
+                    if ($pair[1] -eq 0) {
+                        $errors.Add([pscustomobject]@{
+                            Stage = 'SqlCapabilities'; SubscriptionId = $sub; SubscriptionName = $subName; Region = $region; Family = ''
+                            Message = ("{0} is not offered in this region (capabilities returned no editions)." -f $pair[0])
+                        })
+                    }
+                }
+            }
+            catch {
+                $errors.Add([pscustomobject]@{
+                    Stage = 'SqlCapabilities'; SubscriptionId = $sub; SubscriptionName = $subName; Region = $region; Family = ''
+                    Message = $_.Exception.Message
+                })
+            }
+        }
+    }
+    Write-Host ("[QuotaRecon]   SqlQuota rows={0}  SqlDbCapabilities rows={1}  SqlMiCapabilities rows={2}" -f `
+        $sqlQuota.Count, $sqlDbCapabilities.Count, $sqlMiCapabilities.Count) -ForegroundColor DarkCyan
+}
+
 # ---------- Collect data -----------------------------------------------
 # Skipped entirely under any -Only<Service> mode: no SKUs were resolved in
 # that mode (so $familyRows is empty anyway), but we also skip the
@@ -1020,6 +1109,7 @@ $onlySheetsList = New-Object System.Collections.Generic.List[string]
 if ($OnlyContainerAppsQuota)     { $onlySheetsList.AddRange([string[]]@('ContainerAppsQuota', 'ContainerAppsEnvQuota')) }
 if ($OnlyCognitiveServicesQuota) { $onlySheetsList.Add('CognitiveServicesQuota') }
 if ($OnlyAppServiceQuota)        { $onlySheetsList.Add('AppServiceQuota') }
+if ($OnlySqlQuota)               { $onlySheetsList.AddRange([string[]]@('SqlQuota', 'SqlDbCapabilities', 'SqlMiCapabilities')) }
 Write-QRWorkbook `
     -Path                   $OutputPath `
     -Summary                $summary `
@@ -1033,6 +1123,9 @@ Write-QRWorkbook `
     -ContainerAppsEnvQuota  $containerAppsEnvQuota `
     -CognitiveServicesQuota $cognitiveServicesQuota `
     -AppServiceQuota        $appServiceQuota `
+    -SqlQuota               $sqlQuota `
+    -SqlDbCapabilities      $sqlDbCapabilities `
+    -SqlMiCapabilities      $sqlMiCapabilities `
     -Inputs                 $allInputs `
     -Errors                 $errors `
     -IncludeQuotaGroupSheets:$runQuotaGroups `
@@ -1040,6 +1133,7 @@ Write-QRWorkbook `
     -IncludeContainerAppsSheets:($IncludeContainerAppsQuota -or $OnlyContainerAppsQuota) `
     -IncludeCognitiveServicesSheet:($IncludeCognitiveServicesQuota -or $OnlyCognitiveServicesQuota) `
     -IncludeAppServiceSheet:($IncludeAppServiceQuota -or $OnlyAppServiceQuota) `
+    -IncludeSqlSheets:($IncludeSqlQuota -or $OnlySqlQuota) `
     -OnlySheets             $onlySheetsList
 
 Write-Host ""
@@ -1075,6 +1169,11 @@ if ($IncludeCognitiveServicesQuota -or $OnlyCognitiveServicesQuota) {
 }
 if ($IncludeAppServiceQuota -or $OnlyAppServiceQuota) {
     Write-Host ("  App Service rows   : {0}" -f $appServiceQuota.Count)
+}
+if ($IncludeSqlQuota -or $OnlySqlQuota) {
+    Write-Host ("  SQL quota rows     : {0}" -f $sqlQuota.Count)
+    Write-Host ("  SQL DB capability rows: {0}" -f $sqlDbCapabilities.Count)
+    Write-Host ("  SQL MI capability rows: {0}" -f $sqlMiCapabilities.Count)
 }
 Write-Host ("  Errors             : {0}" -f $errors.Count)
 Write-Host ("  Output             : {0}" -f $OutputPath)
